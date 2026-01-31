@@ -1,0 +1,34 @@
+# Anchor / Solana
+target/
+.anchor/
+
+# Node.js
+node_modules/
+package-lock.json
+yarn.lock
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Keys and secrets
+*.json
+!Anchor.toml
+!Cargo.toml
+!Cargo.lock
+!target/idl/*.json
+!target/types/*.ts
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+test-ledger/
