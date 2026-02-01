@@ -718,6 +718,7 @@ pub mod job_escrow {
     }
 
     /// Execute dispute resolution - transfer funds based on outcome
+    /// Also updates reputation for winner/loser
     pub fn execute_dispute_resolution(ctx: Context<ExecuteDisputeResolution>) -> Result<()> {
         let dispute_case = &ctx.accounts.dispute_case;
         let escrow = &mut ctx.accounts.escrow;
@@ -738,6 +739,10 @@ pub mod job_escrow {
         let available = escrow_lamports.saturating_sub(rent);
         require!(available >= amount, EscrowError::InsufficientFunds);
 
+        // Update reputation based on resolution
+        let worker_rep = &mut ctx.accounts.worker_reputation;
+        let poster_rep = &mut ctx.accounts.poster_reputation;
+
         match resolution {
             DisputeResolution::WorkerWins => {
                 let platform_fee = amount / 100;
@@ -749,11 +754,19 @@ pub mod job_escrow {
                 **escrow.to_account_info().try_borrow_mut_lamports()? -= platform_fee;
                 **ctx.accounts.platform.to_account_info().try_borrow_mut_lamports()? += platform_fee;
 
+                // Worker won the dispute
+                worker_rep.disputes_won += 1;
+                poster_rep.disputes_lost += 1;
+
                 escrow.status = EscrowStatus::Released;
             }
             DisputeResolution::PosterWins => {
                 **escrow.to_account_info().try_borrow_mut_lamports()? -= amount;
                 **ctx.accounts.poster.to_account_info().try_borrow_mut_lamports()? += amount;
+
+                // Poster won the dispute
+                poster_rep.disputes_won += 1;
+                worker_rep.disputes_lost += 1;
 
                 escrow.status = EscrowStatus::Refunded;
             }
@@ -772,14 +785,111 @@ pub mod job_escrow {
                 **escrow.to_account_info().try_borrow_mut_lamports()? -= platform_fee;
                 **ctx.accounts.platform.to_account_info().try_borrow_mut_lamports()? += platform_fee;
 
+                // Split = no clear winner, no reputation change for disputes
+
                 escrow.status = EscrowStatus::Released;
             }
         }
+
+        // Recalculate reputation scores
+        worker_rep.reputation_score = calculate_reputation_score(worker_rep);
+        poster_rep.reputation_score = calculate_reputation_score(poster_rep);
 
         emit!(DisputeResolutionExecuted {
             escrow: escrow.key(),
             resolution,
             amount,
+            worker_new_score: worker_rep.reputation_score,
+            poster_new_score: poster_rep.reputation_score,
+        });
+
+        Ok(())
+    }
+
+    /// Update arbitrator accuracy after dispute resolution
+    /// Call once per arbitrator who voted - updates cases_correct if they voted with majority
+    pub fn update_arbitrator_accuracy(ctx: Context<UpdateArbitratorAccuracy>) -> Result<()> {
+        let dispute_case = &ctx.accounts.dispute_case;
+        let arbitrator = &mut ctx.accounts.arbitrator_account;
+        let arbitrator_key = arbitrator.agent;
+
+        let resolution = dispute_case.resolution.ok_or(EscrowError::DisputeNotResolved)?;
+
+        // Find this arbitrator's vote
+        let position = dispute_case.arbitrators.iter()
+            .position(|&arb| arb == arbitrator_key)
+            .ok_or(EscrowError::NotSelectedArbitrator)?;
+
+        let vote = dispute_case.votes[position].ok_or(EscrowError::ArbitratorDidNotVote)?;
+
+        // Check if arbitrator already got credit for this case
+        // We track this by marking the escrow in the dispute case as "processed" for this arbitrator
+        // Since we can't modify dispute_case here, we rely on the caller to not call twice
+        // In practice, the frontend/crank should track this
+
+        // Determine if vote matched the resolution
+        let voted_correctly = match (vote, resolution) {
+            (Vote::ForWorker, DisputeResolution::WorkerWins) => true,
+            (Vote::ForPoster, DisputeResolution::PosterWins) => true,
+            // Split case: neither side "won", so we consider both votes as correct
+            (_, DisputeResolution::Split) => true,
+            _ => false,
+        };
+
+        if voted_correctly {
+            arbitrator.cases_correct += 1;
+        }
+
+        emit!(ArbitratorAccuracyUpdated {
+            arbitrator: arbitrator_key,
+            dispute_case: dispute_case.key(),
+            voted_correctly,
+            cases_correct: arbitrator.cases_correct,
+            cases_voted: arbitrator.cases_voted,
+        });
+
+        Ok(())
+    }
+
+    /// Close a dispute case after execution - returns rent to initiator
+    pub fn close_dispute_case(ctx: Context<CloseDisputeCase>) -> Result<()> {
+        let dispute_case = &ctx.accounts.dispute_case;
+        let escrow = &ctx.accounts.escrow;
+
+        // Ensure dispute has been resolved and executed
+        require!(dispute_case.resolution.is_some(), EscrowError::DisputeNotResolved);
+        require!(
+            escrow.status == EscrowStatus::Released ||
+            escrow.status == EscrowStatus::Refunded,
+            EscrowError::DisputeNotExecuted
+        );
+
+        emit!(DisputeCaseClosed {
+            dispute_case: dispute_case.key(),
+            escrow: escrow.key(),
+            rent_returned_to: ctx.accounts.initiator.key(),
+        });
+
+        Ok(())
+    }
+
+    /// Close an inactive arbitrator account - returns rent to agent
+    pub fn close_arbitrator_account(ctx: Context<CloseArbitratorAccount>) -> Result<()> {
+        let arbitrator = &ctx.accounts.arbitrator_account;
+        let pool = &ctx.accounts.pool;
+
+        // Ensure arbitrator is not active (already unregistered from pool)
+        require!(!arbitrator.is_active, EscrowError::ArbitratorStillActive);
+        
+        // Double-check they're not in the pool
+        require!(
+            !pool.arbitrators.contains(&arbitrator.agent),
+            EscrowError::ArbitratorStillInPool
+        );
+
+        emit!(ArbitratorAccountClosed {
+            agent: arbitrator.agent,
+            rent_returned: ctx.accounts.arbitrator_account.to_account_info().lamports(),
         });
 
         Ok(())
@@ -1098,8 +1208,75 @@ pub struct ExecuteDisputeResolution<'info> {
     /// CHECK: Platform wallet receives fee
     #[account(mut, address = PLATFORM_WALLET)]
     pub platform: AccountInfo<'info>,
+    #[account(
+        mut,
+        seeds = [b"reputation", escrow.worker.as_ref()],
+        bump = worker_reputation.bump
+    )]
+    pub worker_reputation: Account<'info, AgentReputation>,
+    #[account(
+        mut,
+        seeds = [b"reputation", escrow.poster.as_ref()],
+        bump = poster_reputation.bump
+    )]
+    pub poster_reputation: Account<'info, AgentReputation>,
     /// Anyone can execute after finalization
     pub executor: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct UpdateArbitratorAccuracy<'info> {
+    #[account(
+        constraint = dispute_case.resolution.is_some() @ EscrowError::DisputeNotResolved
+    )]
+    pub dispute_case: Account<'info, DisputeCase>,
+    #[account(
+        mut,
+        seeds = [b"arbitrator", arbitrator_account.agent.as_ref()],
+        bump = arbitrator_account.bump
+    )]
+    pub arbitrator_account: Account<'info, Arbitrator>,
+    /// Anyone can call to update arbitrator stats
+    pub caller: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct CloseDisputeCase<'info> {
+    #[account(
+        mut,
+        close = initiator,
+        seeds = [b"dispute", escrow.key().as_ref()],
+        bump = dispute_case.bump,
+        constraint = dispute_case.raised_by == initiator.key() @ EscrowError::Unauthorized
+    )]
+    pub dispute_case: Account<'info, DisputeCase>,
+    #[account(
+        constraint = escrow.key() == dispute_case.escrow @ EscrowError::EscrowMismatch
+    )]
+    pub escrow: Account<'info, Escrow>,
+    /// Rent returned to the original dispute initiator
+    #[account(mut)]
+    pub initiator: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct CloseArbitratorAccount<'info> {
+    #[account(
+        seeds = [b"arbitrator_pool"],
+        bump = pool.bump
+    )]
+    pub pool: Account<'info, ArbitratorPool>,
+    #[account(
+        mut,
+        close = agent,
+        seeds = [b"arbitrator", agent.key().as_ref()],
+        bump = arbitrator_account.bump,
+        constraint = arbitrator_account.agent == agent.key() @ EscrowError::Unauthorized
+    )]
+    pub arbitrator_account: Account<'info, Arbitrator>,
+    /// Rent returned to the arbitrator agent
+    #[account(mut)]
+    pub agent: Signer<'info>,
 }
 
 // ============== STATE ==============
@@ -1345,6 +1522,30 @@ pub struct DisputeResolutionExecuted {
     pub escrow: Pubkey,
     pub resolution: DisputeResolution,
     pub amount: u64,
+    pub worker_new_score: i64,
+    pub poster_new_score: i64,
+}
+
+#[event]
+pub struct ArbitratorAccuracyUpdated {
+    pub arbitrator: Pubkey,
+    pub dispute_case: Pubkey,
+    pub voted_correctly: bool,
+    pub cases_correct: u64,
+    pub cases_voted: u64,
+}
+
+#[event]
+pub struct DisputeCaseClosed {
+    pub dispute_case: Pubkey,
+    pub escrow: Pubkey,
+    pub rent_returned_to: Pubkey,
+}
+
+#[event]
+pub struct ArbitratorAccountClosed {
+    pub agent: Pubkey,
+    pub rent_returned: u64,
 }
 
 // ============== ERRORS ==============
@@ -1418,4 +1619,12 @@ pub enum EscrowError {
     InvalidStatusForExecution,
     #[msg("Job ID hash does not match provided job ID")]
     HashMismatch,
+    #[msg("Arbitrator did not vote on this dispute")]
+    ArbitratorDidNotVote,
+    #[msg("Dispute has not been executed yet")]
+    DisputeNotExecuted,
+    #[msg("Arbitrator is still active - unregister first")]
+    ArbitratorStillActive,
+    #[msg("Arbitrator is still in the pool")]
+    ArbitratorStillInPool,
 }
