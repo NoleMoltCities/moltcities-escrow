@@ -12,6 +12,10 @@ pub const DEFAULT_EXPIRY_SECONDS: i64 = 30 * 24 * 60 * 60;
 /// Minimum timelock for refunds after dispute: 24 hours
 pub const REFUND_TIMELOCK_SECONDS: i64 = 24 * 60 * 60;
 
+/// Review window after worker submits: 24 hours
+/// Poster must dispute within this window or funds auto-release
+pub const REVIEW_WINDOW_SECONDS: i64 = 24 * 60 * 60;
+
 #[program]
 pub mod job_escrow {
     use super::*;
@@ -65,6 +69,8 @@ pub mod job_escrow {
         escrow.created_at = clock.unix_timestamp;
         escrow.expires_at = expires_at;
         escrow.dispute_initiated_at = None;
+        escrow.submitted_at = None;      // Phase 1
+        escrow.proof_hash = None;        // Phase 1
         escrow.bump = ctx.bumps.escrow;
 
         emit!(EscrowCreated {
@@ -143,9 +149,13 @@ pub mod job_escrow {
     }
 
     /// Initiate a dispute (by poster or platform) - starts timelock
+    /// Can be called from Active or PendingReview states
     pub fn initiate_dispute(ctx: Context<InitiateDispute>) -> Result<()> {
         let escrow = &mut ctx.accounts.escrow;
-        require!(escrow.status == EscrowStatus::Active, EscrowError::EscrowNotActive);
+        require!(
+            escrow.status == EscrowStatus::Active || escrow.status == EscrowStatus::PendingReview,
+            EscrowError::EscrowNotActive
+        );
 
         escrow.status = EscrowStatus::Disputed;
         escrow.dispute_initiated_at = Some(Clock::get()?.unix_timestamp);
@@ -281,6 +291,134 @@ pub mod job_escrow {
 
         Ok(())
     }
+
+    // ============== PHASE 1: CLIENT-MUST-ACT FLOW ==============
+
+    /// Worker submits completed work - starts 24h review window
+    /// Poster must dispute within window or funds auto-release to worker
+    /// 
+    /// # Arguments
+    /// * `proof_hash` - Optional SHA256 hash of work proof (for verification)
+    pub fn submit_work(
+        ctx: Context<SubmitWork>,
+        proof_hash: Option<[u8; 32]>,
+    ) -> Result<()> {
+        let escrow = &mut ctx.accounts.escrow;
+        let clock = Clock::get()?;
+
+        require!(escrow.status == EscrowStatus::Active, EscrowError::EscrowNotActive);
+        require!(escrow.worker != Pubkey::default(), EscrowError::NoWorkerAssigned);
+        require!(
+            escrow.worker == ctx.accounts.worker.key(),
+            EscrowError::WorkerMismatch
+        );
+
+        escrow.status = EscrowStatus::PendingReview;
+        escrow.submitted_at = Some(clock.unix_timestamp);
+        escrow.proof_hash = proof_hash;
+
+        emit!(WorkSubmitted {
+            job_id: escrow.job_id.clone(),
+            worker: ctx.accounts.worker.key(),
+            proof_hash,
+            review_deadline: clock.unix_timestamp + REVIEW_WINDOW_SECONDS,
+        });
+
+        Ok(())
+    }
+
+    /// Poster approves submitted work - releases funds immediately
+    /// Can only be called during review window
+    pub fn approve_work(ctx: Context<ApproveWork>) -> Result<()> {
+        let escrow = &mut ctx.accounts.escrow;
+
+        require!(
+            escrow.status == EscrowStatus::PendingReview,
+            EscrowError::NotPendingReview
+        );
+
+        let amount = escrow.amount;
+        let platform_fee = amount / 100; // 1%
+        let worker_payment = amount - platform_fee;
+
+        escrow.status = EscrowStatus::Released;
+
+        // Get escrow rent
+        let escrow_info = escrow.to_account_info();
+        let rent = Rent::get()?.minimum_balance(escrow_info.data_len());
+        let escrow_lamports = **escrow_info.try_borrow_lamports()?;
+        let available = escrow_lamports.saturating_sub(rent);
+        
+        require!(available >= amount, EscrowError::InsufficientFunds);
+
+        // Transfer to worker (99%)
+        **escrow.to_account_info().try_borrow_mut_lamports()? -= worker_payment;
+        **ctx.accounts.worker.to_account_info().try_borrow_mut_lamports()? += worker_payment;
+
+        // Transfer to platform (1%)
+        **escrow.to_account_info().try_borrow_mut_lamports()? -= platform_fee;
+        **ctx.accounts.platform.to_account_info().try_borrow_mut_lamports()? += platform_fee;
+
+        emit!(WorkApproved {
+            job_id: escrow.job_id.clone(),
+            worker: ctx.accounts.worker.key(),
+            worker_payment,
+            platform_fee,
+            approved_by: ctx.accounts.poster.key(),
+        });
+
+        Ok(())
+    }
+
+    /// Auto-release funds after review window expires
+    /// Anyone can call this to trigger release (permissionless crank)
+    pub fn auto_release(ctx: Context<AutoRelease>) -> Result<()> {
+        let escrow = &mut ctx.accounts.escrow;
+        let clock = Clock::get()?;
+
+        require!(
+            escrow.status == EscrowStatus::PendingReview,
+            EscrowError::NotPendingReview
+        );
+
+        let submitted_at = escrow.submitted_at.ok_or(EscrowError::NoSubmissionTime)?;
+        require!(
+            clock.unix_timestamp >= submitted_at + REVIEW_WINDOW_SECONDS,
+            EscrowError::ReviewWindowNotExpired
+        );
+
+        let amount = escrow.amount;
+        let platform_fee = amount / 100; // 1%
+        let worker_payment = amount - platform_fee;
+
+        escrow.status = EscrowStatus::Released;
+
+        // Get escrow rent
+        let escrow_info = escrow.to_account_info();
+        let rent = Rent::get()?.minimum_balance(escrow_info.data_len());
+        let escrow_lamports = **escrow_info.try_borrow_lamports()?;
+        let available = escrow_lamports.saturating_sub(rent);
+        
+        require!(available >= amount, EscrowError::InsufficientFunds);
+
+        // Transfer to worker (99%)
+        **escrow.to_account_info().try_borrow_mut_lamports()? -= worker_payment;
+        **ctx.accounts.worker.to_account_info().try_borrow_mut_lamports()? += worker_payment;
+
+        // Transfer to platform (1%)
+        **escrow.to_account_info().try_borrow_mut_lamports()? -= platform_fee;
+        **ctx.accounts.platform.to_account_info().try_borrow_mut_lamports()? += platform_fee;
+
+        emit!(WorkAutoReleased {
+            job_id: escrow.job_id.clone(),
+            worker: ctx.accounts.worker.key(),
+            worker_payment,
+            platform_fee,
+            triggered_by: ctx.accounts.cranker.key(),
+        });
+
+        Ok(())
+    }
 }
 
 // ============== ACCOUNTS ==============
@@ -383,6 +521,46 @@ pub struct CloseEscrow<'info> {
     pub poster: Signer<'info>,
 }
 
+// ============== PHASE 1 ACCOUNTS ==============
+
+#[derive(Accounts)]
+pub struct SubmitWork<'info> {
+    #[account(mut)]
+    pub escrow: Account<'info, Escrow>,
+    /// Worker must sign to submit their work
+    #[account(address = escrow.worker @ EscrowError::WorkerMismatch)]
+    pub worker: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct ApproveWork<'info> {
+    #[account(mut)]
+    pub escrow: Account<'info, Escrow>,
+    /// Poster approves the work
+    #[account(address = escrow.poster @ EscrowError::PosterMismatch)]
+    pub poster: Signer<'info>,
+    /// CHECK: Worker receives payment, verified against escrow.worker
+    #[account(mut, address = escrow.worker @ EscrowError::WorkerMismatch)]
+    pub worker: AccountInfo<'info>,
+    /// CHECK: Platform wallet receives 1% fee
+    #[account(mut, address = PLATFORM_WALLET)]
+    pub platform: AccountInfo<'info>,
+}
+
+#[derive(Accounts)]
+pub struct AutoRelease<'info> {
+    #[account(mut)]
+    pub escrow: Account<'info, Escrow>,
+    /// Anyone can crank the auto-release after review window
+    pub cranker: Signer<'info>,
+    /// CHECK: Worker receives payment, verified against escrow.worker
+    #[account(mut, address = escrow.worker @ EscrowError::WorkerMismatch)]
+    pub worker: AccountInfo<'info>,
+    /// CHECK: Platform wallet receives 1% fee
+    #[account(mut, address = PLATFORM_WALLET)]
+    pub platform: AccountInfo<'info>,
+}
+
 // ============== STATE ==============
 
 #[account]
@@ -405,6 +583,10 @@ pub struct Escrow {
     pub expires_at: i64,
     /// When dispute was initiated (for timelock)
     pub dispute_initiated_at: Option<i64>,
+    /// When worker submitted work (starts review window) - Phase 1
+    pub submitted_at: Option<i64>,
+    /// Optional proof of work hash - Phase 1
+    pub proof_hash: Option<[u8; 32]>,
     /// PDA bump seed
     pub bump: u8,
 }
@@ -423,6 +605,8 @@ pub enum EscrowStatus {
     Disputed,
     /// Cancelled before worker assigned
     Cancelled,
+    /// Worker submitted, awaiting poster review (Phase 1)
+    PendingReview,
 }
 
 // ============== EVENTS ==============
@@ -481,6 +665,34 @@ pub struct EscrowClosed {
     pub job_id: String,
 }
 
+// ============== PHASE 1 EVENTS ==============
+
+#[event]
+pub struct WorkSubmitted {
+    pub job_id: String,
+    pub worker: Pubkey,
+    pub proof_hash: Option<[u8; 32]>,
+    pub review_deadline: i64,
+}
+
+#[event]
+pub struct WorkApproved {
+    pub job_id: String,
+    pub worker: Pubkey,
+    pub worker_payment: u64,
+    pub platform_fee: u64,
+    pub approved_by: Pubkey,
+}
+
+#[event]
+pub struct WorkAutoReleased {
+    pub job_id: String,
+    pub worker: Pubkey,
+    pub worker_payment: u64,
+    pub platform_fee: u64,
+    pub triggered_by: Pubkey,
+}
+
 // ============== ERRORS ==============
 
 #[error_code]
@@ -517,4 +729,11 @@ pub enum EscrowError {
     CannotClose,
     #[msg("Insufficient funds in escrow")]
     InsufficientFunds,
+    // Phase 1 errors
+    #[msg("Escrow is not in pending review state")]
+    NotPendingReview,
+    #[msg("No submission timestamp recorded")]
+    NoSubmissionTime,
+    #[msg("Review window has not expired yet (24h required)")]
+    ReviewWindowNotExpired,
 }

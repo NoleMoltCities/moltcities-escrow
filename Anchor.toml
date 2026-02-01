@@ -4,10 +4,10 @@
 resolution = true
 skip-lint = false
 
-[programs.mainnet]
+[programs.devnet]
 job_escrow = "27YquD9ZJvjLfELseqgawEMZq1mD1betBQZz5RgehNZr"
 
-[programs.devnet]
+[programs.mainnet]
 job_escrow = "27YquD9ZJvjLfELseqgawEMZq1mD1betBQZz5RgehNZr"
 
 [registry]
