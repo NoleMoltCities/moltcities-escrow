@@ -8,6 +8,42 @@
   },
   "instructions": [
     {
+      "name": "approve_work",
+      "docs": [
+        "Poster approves submitted work - releases funds immediately"
+      ],
+      "discriminator": [
+        181,
+        118,
+        45,
+        143,
+        204,
+        88,
+        237,
+        109
+      ],
+      "accounts": [
+        {
+          "name": "escrow",
+          "writable": true
+        },
+        {
+          "name": "poster",
+          "signer": true
+        },
+        {
+          "name": "worker",
+          "writable": true
+        },
+        {
+          "name": "platform",
+          "writable": true,
+          "address": "BpH7T5tijFRSyPhMn62WcgGFjHEUMJ8WXQfJ2GAfB893"
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "assign_worker",
       "docs": [
         "Assign a worker to the escrow (called by poster or platform)"
@@ -29,9 +65,6 @@
         },
         {
           "name": "initiator",
-          "docs": [
-            "Must be either the poster or platform authority"
-          ],
           "signer": true
         }
       ],
@@ -43,9 +76,45 @@
       ]
     },
     {
+      "name": "auto_release",
+      "docs": [
+        "Auto-release funds after review window expires"
+      ],
+      "discriminator": [
+        212,
+        34,
+        30,
+        246,
+        192,
+        13,
+        97,
+        31
+      ],
+      "accounts": [
+        {
+          "name": "escrow",
+          "writable": true
+        },
+        {
+          "name": "cranker",
+          "signer": true
+        },
+        {
+          "name": "worker",
+          "writable": true
+        },
+        {
+          "name": "platform",
+          "writable": true,
+          "address": "BpH7T5tijFRSyPhMn62WcgGFjHEUMJ8WXQfJ2GAfB893"
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "cancel_escrow",
       "docs": [
-        "Cancel escrow before worker assigned - poster can cancel freely"
+        "Cancel escrow before worker assigned"
       ],
       "discriminator": [
         156,
@@ -64,9 +133,6 @@
         },
         {
           "name": "poster",
-          "docs": [
-            "Only poster can cancel"
-          ],
           "writable": true,
           "signer": true
         }
@@ -74,9 +140,72 @@
       "args": []
     },
     {
+      "name": "cast_arbitration_vote",
+      "docs": [
+        "Cast a vote on a dispute case"
+      ],
+      "discriminator": [
+        240,
+        213,
+        221,
+        193,
+        161,
+        207,
+        1,
+        252
+      ],
+      "accounts": [
+        {
+          "name": "dispute_case",
+          "writable": true
+        },
+        {
+          "name": "arbitrator_account",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  114,
+                  98,
+                  105,
+                  116,
+                  114,
+                  97,
+                  116,
+                  111,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "voter"
+              }
+            ]
+          }
+        },
+        {
+          "name": "voter",
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "vote",
+          "type": {
+            "defined": {
+              "name": "Vote"
+            }
+          }
+        }
+      ]
+    },
+    {
       "name": "claim_expired",
       "docs": [
-        "Claim expired escrow - poster can reclaim after expiry if unclaimed"
+        "Claim expired escrow - poster can reclaim after expiry"
       ],
       "discriminator": [
         124,
@@ -95,9 +224,6 @@
         },
         {
           "name": "poster",
-          "docs": [
-            "Poster can claim their expired escrow"
-          ],
           "writable": true,
           "signer": true
         }
@@ -107,7 +233,7 @@
     {
       "name": "close_escrow",
       "docs": [
-        "Close escrow account and reclaim rent (only after terminal status)"
+        "Close escrow account and reclaim rent"
       ],
       "discriminator": [
         139,
@@ -139,6 +265,7 @@
         "",
         "# Arguments",
         "* `job_id` - Unique identifier for the job (max 64 chars)",
+        "* `job_id_hash` - SHA256 hash of job_id (for PDA derivation)",
         "* `amount` - Amount of SOL in lamports to deposit",
         "* `expiry_seconds` - Optional custom expiry (defaults to 30 days)"
       ],
@@ -171,7 +298,7 @@
               },
               {
                 "kind": "arg",
-                "path": "job_id"
+                "path": "job_id_hash"
               },
               {
                 "kind": "account",
@@ -196,6 +323,15 @@
           "type": "string"
         },
         {
+          "name": "job_id_hash",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
           "name": "amount",
           "type": "u64"
         },
@@ -206,6 +342,201 @@
           }
         }
       ]
+    },
+    {
+      "name": "execute_dispute_resolution",
+      "docs": [
+        "Execute dispute resolution - transfer funds based on outcome"
+      ],
+      "discriminator": [
+        106,
+        118,
+        253,
+        198,
+        199,
+        146,
+        160,
+        10
+      ],
+      "accounts": [
+        {
+          "name": "dispute_case"
+        },
+        {
+          "name": "escrow",
+          "writable": true
+        },
+        {
+          "name": "worker",
+          "writable": true
+        },
+        {
+          "name": "poster",
+          "writable": true
+        },
+        {
+          "name": "platform",
+          "writable": true,
+          "address": "BpH7T5tijFRSyPhMn62WcgGFjHEUMJ8WXQfJ2GAfB893"
+        },
+        {
+          "name": "executor",
+          "docs": [
+            "Anyone can execute after finalization"
+          ],
+          "signer": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "finalize_dispute_case",
+      "docs": [
+        "Finalize dispute after voting (anyone can call after deadline or when majority reached)"
+      ],
+      "discriminator": [
+        107,
+        168,
+        110,
+        87,
+        12,
+        130,
+        62,
+        87
+      ],
+      "accounts": [
+        {
+          "name": "dispute_case",
+          "writable": true
+        },
+        {
+          "name": "escrow",
+          "writable": true
+        },
+        {
+          "name": "finalizer",
+          "docs": [
+            "Anyone can finalize after deadline or majority"
+          ],
+          "signer": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "init_arbitrator_pool",
+      "docs": [
+        "Initialize the arbitrator pool (platform only, one-time)"
+      ],
+      "discriminator": [
+        11,
+        144,
+        177,
+        30,
+        67,
+        165,
+        15,
+        65
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  114,
+                  98,
+                  105,
+                  116,
+                  114,
+                  97,
+                  116,
+                  111,
+                  114,
+                  95,
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true,
+          "address": "BpH7T5tijFRSyPhMn62WcgGFjHEUMJ8WXQfJ2GAfB893"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "init_reputation",
+      "docs": [
+        "Initialize a reputation account for an agent"
+      ],
+      "discriminator": [
+        236,
+        239,
+        233,
+        112,
+        220,
+        149,
+        26,
+        175
+      ],
+      "accounts": [
+        {
+          "name": "reputation",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  112,
+                  117,
+                  116,
+                  97,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "agent"
+              }
+            ]
+          }
+        },
+        {
+          "name": "agent"
+        },
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
     },
     {
       "name": "initiate_dispute",
@@ -229,13 +560,98 @@
         },
         {
           "name": "initiator",
-          "docs": [
-            "Must be poster or platform authority"
-          ],
           "signer": true
         }
       ],
       "args": []
+    },
+    {
+      "name": "raise_dispute_case",
+      "docs": [
+        "Raise a dispute case - selects 5 random arbitrators"
+      ],
+      "discriminator": [
+        10,
+        126,
+        56,
+        23,
+        108,
+        30,
+        233,
+        214
+      ],
+      "accounts": [
+        {
+          "name": "escrow",
+          "writable": true
+        },
+        {
+          "name": "dispute_case",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  105,
+                  115,
+                  112,
+                  117,
+                  116,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "escrow"
+              }
+            ]
+          }
+        },
+        {
+          "name": "pool",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  114,
+                  98,
+                  105,
+                  116,
+                  114,
+                  97,
+                  116,
+                  111,
+                  114,
+                  95,
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "initiator",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "reason",
+          "type": "string"
+        }
+      ]
     },
     {
       "name": "refund_to_poster",
@@ -259,9 +675,6 @@
         },
         {
           "name": "platform_authority",
-          "docs": [
-            "Platform authority MUST sign refunds"
-          ],
           "signer": true,
           "address": "BpH7T5tijFRSyPhMn62WcgGFjHEUMJ8WXQfJ2GAfB893"
         },
@@ -273,10 +686,94 @@
       "args": []
     },
     {
+      "name": "register_arbitrator",
+      "docs": [
+        "Register as an arbitrator (requires stake)"
+      ],
+      "discriminator": [
+        141,
+        158,
+        50,
+        47,
+        214,
+        118,
+        229,
+        183
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  114,
+                  98,
+                  105,
+                  116,
+                  114,
+                  97,
+                  116,
+                  111,
+                  114,
+                  95,
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "arbitrator_account",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  114,
+                  98,
+                  105,
+                  116,
+                  114,
+                  97,
+                  116,
+                  111,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "agent"
+              }
+            ]
+          }
+        },
+        {
+          "name": "agent",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "release_to_worker",
       "docs": [
         "Release funds to worker - ONLY platform authority can call this",
-        "Takes 1% platform fee, sends 99% to worker"
+        "Takes 1% platform fee, sends 99% to worker",
+        "Updates reputation for both parties"
       ],
       "discriminator": [
         54,
@@ -295,9 +792,6 @@
         },
         {
           "name": "platform_authority",
-          "docs": [
-            "Platform authority MUST sign releases"
-          ],
           "signer": true,
           "address": "BpH7T5tijFRSyPhMn62WcgGFjHEUMJ8WXQfJ2GAfB893"
         },
@@ -312,9 +806,272 @@
         }
       ],
       "args": []
+    },
+    {
+      "name": "release_with_reputation",
+      "docs": [
+        "Release funds with reputation update (preferred over raw release_to_worker)"
+      ],
+      "discriminator": [
+        26,
+        9,
+        72,
+        215,
+        237,
+        238,
+        21,
+        161
+      ],
+      "accounts": [
+        {
+          "name": "escrow",
+          "writable": true
+        },
+        {
+          "name": "platform_authority",
+          "signer": true,
+          "address": "BpH7T5tijFRSyPhMn62WcgGFjHEUMJ8WXQfJ2GAfB893"
+        },
+        {
+          "name": "worker",
+          "writable": true
+        },
+        {
+          "name": "platform",
+          "writable": true,
+          "address": "BpH7T5tijFRSyPhMn62WcgGFjHEUMJ8WXQfJ2GAfB893"
+        },
+        {
+          "name": "worker_reputation",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  112,
+                  117,
+                  116,
+                  97,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "escrow.worker",
+                "account": "Escrow"
+              }
+            ]
+          }
+        },
+        {
+          "name": "poster_reputation",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  112,
+                  117,
+                  116,
+                  97,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "escrow.poster",
+                "account": "Escrow"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "submit_work",
+      "docs": [
+        "Worker submits completed work - starts 24h review window"
+      ],
+      "discriminator": [
+        158,
+        80,
+        101,
+        51,
+        114,
+        130,
+        101,
+        253
+      ],
+      "accounts": [
+        {
+          "name": "escrow",
+          "writable": true
+        },
+        {
+          "name": "worker",
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "proof_hash",
+          "type": {
+            "option": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "unregister_arbitrator",
+      "docs": [
+        "Unregister as arbitrator and reclaim stake"
+      ],
+      "discriminator": [
+        13,
+        240,
+        59,
+        205,
+        246,
+        147,
+        167,
+        141
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  114,
+                  98,
+                  105,
+                  116,
+                  114,
+                  97,
+                  116,
+                  111,
+                  114,
+                  95,
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "arbitrator_account",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  114,
+                  98,
+                  105,
+                  116,
+                  114,
+                  97,
+                  116,
+                  111,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "agent"
+              }
+            ]
+          }
+        },
+        {
+          "name": "agent",
+          "writable": true,
+          "signer": true
+        }
+      ],
+      "args": []
     }
   ],
   "accounts": [
+    {
+      "name": "AgentReputation",
+      "discriminator": [
+        245,
+        56,
+        239,
+        246,
+        36,
+        231,
+        227,
+        67
+      ]
+    },
+    {
+      "name": "Arbitrator",
+      "discriminator": [
+        85,
+        123,
+        106,
+        57,
+        25,
+        249,
+        89,
+        192
+      ]
+    },
+    {
+      "name": "ArbitratorPool",
+      "discriminator": [
+        110,
+        146,
+        61,
+        53,
+        98,
+        139,
+        247,
+        106
+      ]
+    },
+    {
+      "name": "DisputeCase",
+      "discriminator": [
+        164,
+        200,
+        54,
+        239,
+        94,
+        76,
+        51,
+        130
+      ]
+    },
     {
       "name": "Escrow",
       "discriminator": [
@@ -331,6 +1088,84 @@
   ],
   "events": [
     {
+      "name": "ArbitrationVoteCast",
+      "discriminator": [
+        165,
+        230,
+        250,
+        68,
+        108,
+        54,
+        7,
+        140
+      ]
+    },
+    {
+      "name": "ArbitratorPoolInitialized",
+      "discriminator": [
+        163,
+        29,
+        162,
+        210,
+        115,
+        199,
+        165,
+        48
+      ]
+    },
+    {
+      "name": "ArbitratorRegistered",
+      "discriminator": [
+        74,
+        66,
+        60,
+        131,
+        232,
+        53,
+        205,
+        93
+      ]
+    },
+    {
+      "name": "ArbitratorUnregistered",
+      "discriminator": [
+        120,
+        195,
+        7,
+        229,
+        67,
+        66,
+        104,
+        133
+      ]
+    },
+    {
+      "name": "DisputeCaseFinalized",
+      "discriminator": [
+        116,
+        199,
+        192,
+        231,
+        76,
+        80,
+        152,
+        185
+      ]
+    },
+    {
+      "name": "DisputeCaseRaised",
+      "discriminator": [
+        142,
+        179,
+        148,
+        207,
+        15,
+        249,
+        225,
+        114
+      ]
+    },
+    {
       "name": "DisputeInitiated",
       "discriminator": [
         150,
@@ -341,6 +1176,19 @@
         4,
         183,
         153
+      ]
+    },
+    {
+      "name": "DisputeResolutionExecuted",
+      "discriminator": [
+        82,
+        194,
+        247,
+        84,
+        44,
+        8,
+        152,
+        214
       ]
     },
     {
@@ -419,6 +1267,71 @@
         104,
         210,
         210
+      ]
+    },
+    {
+      "name": "FundsReleasedWithReputation",
+      "discriminator": [
+        233,
+        54,
+        63,
+        144,
+        12,
+        219,
+        73,
+        246
+      ]
+    },
+    {
+      "name": "ReputationInitialized",
+      "discriminator": [
+        167,
+        122,
+        115,
+        118,
+        198,
+        80,
+        35,
+        69
+      ]
+    },
+    {
+      "name": "WorkApproved",
+      "discriminator": [
+        82,
+        19,
+        106,
+        191,
+        46,
+        255,
+        164,
+        142
+      ]
+    },
+    {
+      "name": "WorkAutoReleased",
+      "discriminator": [
+        160,
+        95,
+        24,
+        199,
+        50,
+        204,
+        130,
+        144
+      ]
+    },
+    {
+      "name": "WorkSubmitted",
+      "discriminator": [
+        136,
+        185,
+        210,
+        174,
+        216,
+        140,
+        64,
+        125
       ]
     },
     {
@@ -515,9 +1428,399 @@
       "code": 6015,
       "name": "InsufficientFunds",
       "msg": "Insufficient funds in escrow"
+    },
+    {
+      "code": 6016,
+      "name": "NotPendingReview",
+      "msg": "Escrow is not in pending review state"
+    },
+    {
+      "code": 6017,
+      "name": "NoSubmissionTime",
+      "msg": "No submission timestamp recorded"
+    },
+    {
+      "code": 6018,
+      "name": "ReviewWindowNotExpired",
+      "msg": "Review window has not expired yet (24h required)"
+    },
+    {
+      "code": 6019,
+      "name": "ArbitratorPoolFull",
+      "msg": "Arbitrator pool is full (max 100)"
+    },
+    {
+      "code": 6020,
+      "name": "AlreadyArbitrator",
+      "msg": "Already registered as arbitrator"
+    },
+    {
+      "code": 6021,
+      "name": "ArbitratorNotActive",
+      "msg": "Arbitrator is not active"
+    },
+    {
+      "code": 6022,
+      "name": "NotEnoughArbitrators",
+      "msg": "Not enough arbitrators in pool (need 5)"
+    },
+    {
+      "code": 6023,
+      "name": "ReasonTooLong",
+      "msg": "Reason too long (max 500 chars)"
+    },
+    {
+      "code": 6024,
+      "name": "NotSelectedArbitrator",
+      "msg": "Not selected as arbitrator for this case"
+    },
+    {
+      "code": 6025,
+      "name": "AlreadyVoted",
+      "msg": "Already voted on this dispute"
+    },
+    {
+      "code": 6026,
+      "name": "DisputeAlreadyResolved",
+      "msg": "Dispute already resolved"
+    },
+    {
+      "code": 6027,
+      "name": "VotingDeadlinePassed",
+      "msg": "Voting deadline has passed"
+    },
+    {
+      "code": 6028,
+      "name": "VotingNotComplete",
+      "msg": "Voting not complete (no majority and deadline not passed)"
+    },
+    {
+      "code": 6029,
+      "name": "DisputeNotResolved",
+      "msg": "Dispute not yet resolved"
+    },
+    {
+      "code": 6030,
+      "name": "EscrowMismatch",
+      "msg": "Escrow mismatch"
+    },
+    {
+      "code": 6031,
+      "name": "InvalidStatusForExecution",
+      "msg": "Invalid status for execution"
+    },
+    {
+      "code": 6032,
+      "name": "HashMismatch",
+      "msg": "Job ID hash does not match provided job ID"
     }
   ],
   "types": [
+    {
+      "name": "AgentReputation",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "agent",
+            "type": "pubkey"
+          },
+          {
+            "name": "jobs_completed",
+            "type": "u64"
+          },
+          {
+            "name": "jobs_posted",
+            "type": "u64"
+          },
+          {
+            "name": "total_earned",
+            "type": "u64"
+          },
+          {
+            "name": "total_spent",
+            "type": "u64"
+          },
+          {
+            "name": "disputes_won",
+            "type": "u64"
+          },
+          {
+            "name": "disputes_lost",
+            "type": "u64"
+          },
+          {
+            "name": "reputation_score",
+            "type": "i64"
+          },
+          {
+            "name": "created_at",
+            "type": "i64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ArbitrationVoteCast",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "dispute_case",
+            "type": "pubkey"
+          },
+          {
+            "name": "arbitrator",
+            "type": "pubkey"
+          },
+          {
+            "name": "vote",
+            "type": {
+              "defined": {
+                "name": "Vote"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "Arbitrator",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "agent",
+            "type": "pubkey"
+          },
+          {
+            "name": "stake",
+            "type": "u64"
+          },
+          {
+            "name": "cases_voted",
+            "type": "u64"
+          },
+          {
+            "name": "cases_correct",
+            "type": "u64"
+          },
+          {
+            "name": "is_active",
+            "type": "bool"
+          },
+          {
+            "name": "registered_at",
+            "type": "i64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ArbitratorPool",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "arbitrators",
+            "type": {
+              "vec": "pubkey"
+            }
+          },
+          {
+            "name": "min_stake",
+            "type": "u64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ArbitratorPoolInitialized",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "authority",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ArbitratorRegistered",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "agent",
+            "type": "pubkey"
+          },
+          {
+            "name": "stake",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ArbitratorUnregistered",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "agent",
+            "type": "pubkey"
+          },
+          {
+            "name": "stake_returned",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "DisputeCase",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "escrow",
+            "type": "pubkey"
+          },
+          {
+            "name": "raised_by",
+            "type": "pubkey"
+          },
+          {
+            "name": "reason",
+            "type": "string"
+          },
+          {
+            "name": "arbitrators",
+            "type": {
+              "array": [
+                "pubkey",
+                5
+              ]
+            }
+          },
+          {
+            "name": "votes",
+            "type": {
+              "array": [
+                {
+                  "option": {
+                    "defined": {
+                      "name": "Vote"
+                    }
+                  }
+                },
+                5
+              ]
+            }
+          },
+          {
+            "name": "voting_deadline",
+            "type": "i64"
+          },
+          {
+            "name": "resolution",
+            "type": {
+              "option": {
+                "defined": {
+                  "name": "DisputeResolution"
+                }
+              }
+            }
+          },
+          {
+            "name": "created_at",
+            "type": "i64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "DisputeCaseFinalized",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "dispute_case",
+            "type": "pubkey"
+          },
+          {
+            "name": "resolution",
+            "type": {
+              "defined": {
+                "name": "DisputeResolution"
+              }
+            }
+          },
+          {
+            "name": "votes_for_worker",
+            "type": "u8"
+          },
+          {
+            "name": "votes_for_poster",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "DisputeCaseRaised",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "escrow",
+            "type": "pubkey"
+          },
+          {
+            "name": "raised_by",
+            "type": "pubkey"
+          },
+          {
+            "name": "arbitrators",
+            "type": {
+              "array": [
+                "pubkey",
+                5
+              ]
+            }
+          },
+          {
+            "name": "voting_deadline",
+            "type": "i64"
+          },
+          {
+            "name": "reason",
+            "type": "string"
+          }
+        ]
+      }
+    },
     {
       "name": "DisputeInitiated",
       "type": {
@@ -535,43 +1838,69 @@
       }
     },
     {
+      "name": "DisputeResolution",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "WorkerWins"
+          },
+          {
+            "name": "PosterWins"
+          },
+          {
+            "name": "Split"
+          }
+        ]
+      }
+    },
+    {
+      "name": "DisputeResolutionExecuted",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "escrow",
+            "type": "pubkey"
+          },
+          {
+            "name": "resolution",
+            "type": {
+              "defined": {
+                "name": "DisputeResolution"
+              }
+            }
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
       "name": "Escrow",
       "type": {
         "kind": "struct",
         "fields": [
           {
             "name": "poster",
-            "docs": [
-              "Job poster who deposited funds"
-            ],
             "type": "pubkey"
           },
           {
             "name": "worker",
-            "docs": [
-              "Assigned worker (default if unassigned)"
-            ],
             "type": "pubkey"
           },
           {
             "name": "job_id",
-            "docs": [
-              "Unique job identifier"
-            ],
             "type": "string"
           },
           {
             "name": "amount",
-            "docs": [
-              "Escrowed amount in lamports"
-            ],
             "type": "u64"
           },
           {
             "name": "status",
-            "docs": [
-              "Current status"
-            ],
             "type": {
               "defined": {
                 "name": "EscrowStatus"
@@ -580,32 +1909,43 @@
           },
           {
             "name": "created_at",
-            "docs": [
-              "Creation timestamp"
-            ],
             "type": "i64"
           },
           {
             "name": "expires_at",
-            "docs": [
-              "Expiry timestamp (poster can reclaim after)"
-            ],
             "type": "i64"
           },
           {
             "name": "dispute_initiated_at",
-            "docs": [
-              "When dispute was initiated (for timelock)"
-            ],
             "type": {
               "option": "i64"
             }
           },
           {
+            "name": "submitted_at",
+            "type": {
+              "option": "i64"
+            }
+          },
+          {
+            "name": "proof_hash",
+            "type": {
+              "option": {
+                "array": [
+                  "u8",
+                  32
+                ]
+              }
+            }
+          },
+          {
+            "name": "dispute_case",
+            "type": {
+              "option": "pubkey"
+            }
+          },
+          {
             "name": "bump",
-            "docs": [
-              "PDA bump seed"
-            ],
             "type": "u8"
           }
         ]
@@ -709,6 +2049,21 @@
           },
           {
             "name": "Cancelled"
+          },
+          {
+            "name": "PendingReview"
+          },
+          {
+            "name": "InArbitration"
+          },
+          {
+            "name": "DisputeWorkerWins"
+          },
+          {
+            "name": "DisputePosterWins"
+          },
+          {
+            "name": "DisputeSplit"
           }
         ]
       }
@@ -753,6 +2108,151 @@
           {
             "name": "platform_fee",
             "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "FundsReleasedWithReputation",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "job_id",
+            "type": "string"
+          },
+          {
+            "name": "worker",
+            "type": "pubkey"
+          },
+          {
+            "name": "worker_payment",
+            "type": "u64"
+          },
+          {
+            "name": "platform_fee",
+            "type": "u64"
+          },
+          {
+            "name": "worker_new_score",
+            "type": "i64"
+          },
+          {
+            "name": "poster_new_score",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ReputationInitialized",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "agent",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Vote",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "ForWorker"
+          },
+          {
+            "name": "ForPoster"
+          }
+        ]
+      }
+    },
+    {
+      "name": "WorkApproved",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "job_id",
+            "type": "string"
+          },
+          {
+            "name": "worker",
+            "type": "pubkey"
+          },
+          {
+            "name": "worker_payment",
+            "type": "u64"
+          },
+          {
+            "name": "platform_fee",
+            "type": "u64"
+          },
+          {
+            "name": "approved_by",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "WorkAutoReleased",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "job_id",
+            "type": "string"
+          },
+          {
+            "name": "worker",
+            "type": "pubkey"
+          },
+          {
+            "name": "worker_payment",
+            "type": "u64"
+          },
+          {
+            "name": "platform_fee",
+            "type": "u64"
+          },
+          {
+            "name": "triggered_by",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "WorkSubmitted",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "job_id",
+            "type": "string"
+          },
+          {
+            "name": "worker",
+            "type": "pubkey"
+          },
+          {
+            "name": "proof_hash",
+            "type": {
+              "option": {
+                "array": [
+                  "u8",
+                  32
+                ]
+              }
+            }
+          },
+          {
+            "name": "review_deadline",
+            "type": "i64"
           }
         ]
       }

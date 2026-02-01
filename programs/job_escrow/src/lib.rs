@@ -16,6 +16,24 @@ pub const REFUND_TIMELOCK_SECONDS: i64 = 24 * 60 * 60;
 /// Poster must dispute within this window or funds auto-release
 pub const REVIEW_WINDOW_SECONDS: i64 = 24 * 60 * 60;
 
+/// Arbitration voting window: 48 hours
+pub const ARBITRATION_VOTING_SECONDS: i64 = 48 * 60 * 60;
+
+/// Number of arbitrators per dispute
+pub const ARBITRATORS_PER_DISPUTE: usize = 5;
+
+/// Majority needed to win (3 of 5)
+pub const ARBITRATION_MAJORITY: usize = 3;
+
+/// Minimum stake to become an arbitrator (0.1 SOL)
+pub const MIN_ARBITRATOR_STAKE: u64 = 100_000_000;
+
+/// Fee per vote for arbitrators (0.001 SOL)
+pub const ARBITRATOR_VOTE_FEE: u64 = 1_000_000;
+
+/// Maximum arbitrators in pool
+pub const MAX_ARBITRATORS: usize = 100;
+
 #[program]
 pub mod job_escrow {
     use super::*;
@@ -24,27 +42,32 @@ pub mod job_escrow {
     /// 
     /// # Arguments
     /// * `job_id` - Unique identifier for the job (max 64 chars)
+    /// * `job_id_hash` - SHA256 hash of job_id (for PDA derivation)
     /// * `amount` - Amount of SOL in lamports to deposit
     /// * `expiry_seconds` - Optional custom expiry (defaults to 30 days)
     pub fn create_escrow(
         ctx: Context<CreateEscrow>,
         job_id: String,
+        job_id_hash: [u8; 32],
         amount: u64,
         expiry_seconds: Option<i64>,
     ) -> Result<()> {
         require!(amount > 0, EscrowError::InvalidAmount);
         require!(job_id.len() <= 64, EscrowError::JobIdTooLong);
         
+        // Verify the provided hash matches the job_id
+        let computed_hash = sha256_hash(job_id.as_bytes());
+        require!(computed_hash.as_ref() == job_id_hash.as_ref(), EscrowError::HashMismatch);
+        
         let clock = Clock::get()?;
         let expiry = expiry_seconds.unwrap_or(DEFAULT_EXPIRY_SECONDS);
         require!(expiry > 0, EscrowError::InvalidExpiry);
 
-        // Get keys before borrowing mutably
         let poster_key = ctx.accounts.poster.key();
         let escrow_key = ctx.accounts.escrow.key();
         let expires_at = clock.unix_timestamp + expiry;
 
-        // Transfer SOL from poster to escrow PDA first
+        // Transfer SOL from poster to escrow PDA
         let transfer_ix = anchor_lang::solana_program::system_instruction::transfer(
             &poster_key,
             &escrow_key,
@@ -59,18 +82,18 @@ pub mod job_escrow {
             ],
         )?;
 
-        // Now borrow mutably to update state
         let escrow = &mut ctx.accounts.escrow;
         escrow.poster = poster_key;
-        escrow.worker = Pubkey::default(); // Not assigned yet
+        escrow.worker = Pubkey::default();
         escrow.job_id = job_id.clone();
         escrow.amount = amount;
         escrow.status = EscrowStatus::Active;
         escrow.created_at = clock.unix_timestamp;
         escrow.expires_at = expires_at;
         escrow.dispute_initiated_at = None;
-        escrow.submitted_at = None;      // Phase 1
-        escrow.proof_hash = None;        // Phase 1
+        escrow.submitted_at = None;
+        escrow.proof_hash = None;
+        escrow.dispute_case = None;
         escrow.bump = ctx.bumps.escrow;
 
         emit!(EscrowCreated {
@@ -104,6 +127,7 @@ pub mod job_escrow {
 
     /// Release funds to worker - ONLY platform authority can call this
     /// Takes 1% platform fee, sends 99% to worker
+    /// Updates reputation for both parties
     pub fn release_to_worker(ctx: Context<ReleaseToWorker>) -> Result<()> {
         let escrow = &mut ctx.accounts.escrow;
         require!(escrow.status == EscrowStatus::Active, EscrowError::EscrowNotActive);
@@ -114,27 +138,21 @@ pub mod job_escrow {
         );
 
         let amount = escrow.amount;
-        let platform_fee = amount / 100; // 1%
+        let platform_fee = amount / 100;
         let worker_payment = amount - platform_fee;
 
         escrow.status = EscrowStatus::Released;
 
-        // Get escrow rent to leave behind (minimum for account to exist)
         let escrow_info = escrow.to_account_info();
         let rent = Rent::get()?.minimum_balance(escrow_info.data_len());
-        
-        // Calculate available lamports (total - rent)
         let escrow_lamports = **escrow_info.try_borrow_lamports()?;
         let available = escrow_lamports.saturating_sub(rent);
         
-        // Ensure we have enough
         require!(available >= amount, EscrowError::InsufficientFunds);
 
-        // Transfer to worker (99%)
         **escrow.to_account_info().try_borrow_mut_lamports()? -= worker_payment;
         **ctx.accounts.worker.to_account_info().try_borrow_mut_lamports()? += worker_payment;
 
-        // Transfer to platform (1%)
         **escrow.to_account_info().try_borrow_mut_lamports()? -= platform_fee;
         **ctx.accounts.platform.to_account_info().try_borrow_mut_lamports()? += platform_fee;
 
@@ -149,7 +167,6 @@ pub mod job_escrow {
     }
 
     /// Initiate a dispute (by poster or platform) - starts timelock
-    /// Can be called from Active or PendingReview states
     pub fn initiate_dispute(ctx: Context<InitiateDispute>) -> Result<()> {
         let escrow = &mut ctx.accounts.escrow;
         require!(
@@ -173,13 +190,11 @@ pub mod job_escrow {
         let escrow = &mut ctx.accounts.escrow;
         let clock = Clock::get()?;
 
-        // Must be disputed or cancelled
         require!(
             escrow.status == EscrowStatus::Disputed || escrow.status == EscrowStatus::Cancelled,
             EscrowError::RefundNotAllowed
         );
 
-        // Check timelock has passed (if disputed)
         if escrow.status == EscrowStatus::Disputed {
             let dispute_time = escrow.dispute_initiated_at.ok_or(EscrowError::NoDisputeTime)?;
             require!(
@@ -191,7 +206,6 @@ pub mod job_escrow {
         let amount = escrow.amount;
         escrow.status = EscrowStatus::Refunded;
 
-        // Get escrow rent
         let escrow_info = escrow.to_account_info();
         let rent = Rent::get()?.minimum_balance(escrow_info.data_len());
         let escrow_lamports = **escrow_info.try_borrow_lamports()?;
@@ -199,7 +213,6 @@ pub mod job_escrow {
         
         require!(available >= amount, EscrowError::InsufficientFunds);
 
-        // Transfer full amount back to poster (no fee on refunds)
         **escrow.to_account_info().try_borrow_mut_lamports()? -= amount;
         **ctx.accounts.poster.to_account_info().try_borrow_mut_lamports()? += amount;
 
@@ -212,7 +225,7 @@ pub mod job_escrow {
         Ok(())
     }
 
-    /// Claim expired escrow - poster can reclaim after expiry if unclaimed
+    /// Claim expired escrow - poster can reclaim after expiry
     pub fn claim_expired(ctx: Context<ClaimExpired>) -> Result<()> {
         let escrow = &mut ctx.accounts.escrow;
         let clock = Clock::get()?;
@@ -223,7 +236,6 @@ pub mod job_escrow {
         let amount = escrow.amount;
         escrow.status = EscrowStatus::Expired;
 
-        // Get escrow rent
         let escrow_info = escrow.to_account_info();
         let rent = Rent::get()?.minimum_balance(escrow_info.data_len());
         let escrow_lamports = **escrow_info.try_borrow_lamports()?;
@@ -231,7 +243,6 @@ pub mod job_escrow {
         
         require!(available >= amount, EscrowError::InsufficientFunds);
 
-        // Return to poster
         **escrow.to_account_info().try_borrow_mut_lamports()? -= amount;
         **ctx.accounts.poster.to_account_info().try_borrow_mut_lamports()? += amount;
 
@@ -244,7 +255,7 @@ pub mod job_escrow {
         Ok(())
     }
 
-    /// Cancel escrow before worker assigned - poster can cancel freely
+    /// Cancel escrow before worker assigned
     pub fn cancel_escrow(ctx: Context<CancelEscrow>) -> Result<()> {
         let escrow = &mut ctx.accounts.escrow;
         require!(escrow.status == EscrowStatus::Active, EscrowError::EscrowNotActive);
@@ -253,7 +264,6 @@ pub mod job_escrow {
         let amount = escrow.amount;
         escrow.status = EscrowStatus::Cancelled;
 
-        // Get escrow rent
         let escrow_info = escrow.to_account_info();
         let rent = Rent::get()?.minimum_balance(escrow_info.data_len());
         let escrow_lamports = **escrow_info.try_borrow_lamports()?;
@@ -261,7 +271,6 @@ pub mod job_escrow {
         
         require!(available >= amount, EscrowError::InsufficientFunds);
 
-        // Return to poster
         **escrow.to_account_info().try_borrow_mut_lamports()? -= amount;
         **ctx.accounts.poster.to_account_info().try_borrow_mut_lamports()? += amount;
 
@@ -274,7 +283,7 @@ pub mod job_escrow {
         Ok(())
     }
 
-    /// Close escrow account and reclaim rent (only after terminal status)
+    /// Close escrow account and reclaim rent
     pub fn close_escrow(ctx: Context<CloseEscrow>) -> Result<()> {
         let escrow = &ctx.accounts.escrow;
         require!(
@@ -295,10 +304,6 @@ pub mod job_escrow {
     // ============== PHASE 1: CLIENT-MUST-ACT FLOW ==============
 
     /// Worker submits completed work - starts 24h review window
-    /// Poster must dispute within window or funds auto-release to worker
-    /// 
-    /// # Arguments
-    /// * `proof_hash` - Optional SHA256 hash of work proof (for verification)
     pub fn submit_work(
         ctx: Context<SubmitWork>,
         proof_hash: Option<[u8; 32]>,
@@ -328,7 +333,6 @@ pub mod job_escrow {
     }
 
     /// Poster approves submitted work - releases funds immediately
-    /// Can only be called during review window
     pub fn approve_work(ctx: Context<ApproveWork>) -> Result<()> {
         let escrow = &mut ctx.accounts.escrow;
 
@@ -338,12 +342,11 @@ pub mod job_escrow {
         );
 
         let amount = escrow.amount;
-        let platform_fee = amount / 100; // 1%
+        let platform_fee = amount / 100;
         let worker_payment = amount - platform_fee;
 
         escrow.status = EscrowStatus::Released;
 
-        // Get escrow rent
         let escrow_info = escrow.to_account_info();
         let rent = Rent::get()?.minimum_balance(escrow_info.data_len());
         let escrow_lamports = **escrow_info.try_borrow_lamports()?;
@@ -351,11 +354,9 @@ pub mod job_escrow {
         
         require!(available >= amount, EscrowError::InsufficientFunds);
 
-        // Transfer to worker (99%)
         **escrow.to_account_info().try_borrow_mut_lamports()? -= worker_payment;
         **ctx.accounts.worker.to_account_info().try_borrow_mut_lamports()? += worker_payment;
 
-        // Transfer to platform (1%)
         **escrow.to_account_info().try_borrow_mut_lamports()? -= platform_fee;
         **ctx.accounts.platform.to_account_info().try_borrow_mut_lamports()? += platform_fee;
 
@@ -371,7 +372,6 @@ pub mod job_escrow {
     }
 
     /// Auto-release funds after review window expires
-    /// Anyone can call this to trigger release (permissionless crank)
     pub fn auto_release(ctx: Context<AutoRelease>) -> Result<()> {
         let escrow = &mut ctx.accounts.escrow;
         let clock = Clock::get()?;
@@ -388,12 +388,11 @@ pub mod job_escrow {
         );
 
         let amount = escrow.amount;
-        let platform_fee = amount / 100; // 1%
+        let platform_fee = amount / 100;
         let worker_payment = amount - platform_fee;
 
         escrow.status = EscrowStatus::Released;
 
-        // Get escrow rent
         let escrow_info = escrow.to_account_info();
         let rent = Rent::get()?.minimum_balance(escrow_info.data_len());
         let escrow_lamports = **escrow_info.try_borrow_lamports()?;
@@ -401,11 +400,9 @@ pub mod job_escrow {
         
         require!(available >= amount, EscrowError::InsufficientFunds);
 
-        // Transfer to worker (99%)
         **escrow.to_account_info().try_borrow_mut_lamports()? -= worker_payment;
         **ctx.accounts.worker.to_account_info().try_borrow_mut_lamports()? += worker_payment;
 
-        // Transfer to platform (1%)
         **escrow.to_account_info().try_borrow_mut_lamports()? -= platform_fee;
         **ctx.accounts.platform.to_account_info().try_borrow_mut_lamports()? += platform_fee;
 
@@ -419,19 +416,395 @@ pub mod job_escrow {
 
         Ok(())
     }
+
+    // ============== PHASE 2: REPUTATION SYSTEM ==============
+
+    /// Initialize a reputation account for an agent
+    pub fn init_reputation(ctx: Context<InitReputation>) -> Result<()> {
+        let reputation = &mut ctx.accounts.reputation;
+        let clock = Clock::get()?;
+
+        reputation.agent = ctx.accounts.agent.key();
+        reputation.jobs_completed = 0;
+        reputation.jobs_posted = 0;
+        reputation.total_earned = 0;
+        reputation.total_spent = 0;
+        reputation.disputes_won = 0;
+        reputation.disputes_lost = 0;
+        reputation.reputation_score = 0;
+        reputation.created_at = clock.unix_timestamp;
+        reputation.bump = ctx.bumps.reputation;
+
+        emit!(ReputationInitialized {
+            agent: ctx.accounts.agent.key(),
+        });
+
+        Ok(())
+    }
+
+    /// Release funds with reputation update (preferred over raw release_to_worker)
+    pub fn release_with_reputation(ctx: Context<ReleaseWithReputation>) -> Result<()> {
+        let escrow = &mut ctx.accounts.escrow;
+        require!(escrow.status == EscrowStatus::Active || escrow.status == EscrowStatus::PendingReview, 
+            EscrowError::EscrowNotActive);
+        require!(escrow.worker != Pubkey::default(), EscrowError::NoWorkerAssigned);
+        require!(
+            escrow.worker == ctx.accounts.worker.key(),
+            EscrowError::WorkerMismatch
+        );
+
+        let amount = escrow.amount;
+        let platform_fee = amount / 100;
+        let worker_payment = amount - platform_fee;
+
+        escrow.status = EscrowStatus::Released;
+
+        // Update worker reputation
+        let worker_rep = &mut ctx.accounts.worker_reputation;
+        worker_rep.jobs_completed += 1;
+        worker_rep.total_earned += worker_payment;
+        worker_rep.reputation_score = calculate_reputation_score(worker_rep);
+
+        // Update poster reputation
+        let poster_rep = &mut ctx.accounts.poster_reputation;
+        poster_rep.jobs_posted += 1;
+        poster_rep.total_spent += amount;
+        poster_rep.reputation_score = calculate_reputation_score(poster_rep);
+
+        let escrow_info = escrow.to_account_info();
+        let rent = Rent::get()?.minimum_balance(escrow_info.data_len());
+        let escrow_lamports = **escrow_info.try_borrow_lamports()?;
+        let available = escrow_lamports.saturating_sub(rent);
+        
+        require!(available >= amount, EscrowError::InsufficientFunds);
+
+        **escrow.to_account_info().try_borrow_mut_lamports()? -= worker_payment;
+        **ctx.accounts.worker.to_account_info().try_borrow_mut_lamports()? += worker_payment;
+
+        **escrow.to_account_info().try_borrow_mut_lamports()? -= platform_fee;
+        **ctx.accounts.platform.to_account_info().try_borrow_mut_lamports()? += platform_fee;
+
+        emit!(FundsReleasedWithReputation {
+            job_id: escrow.job_id.clone(),
+            worker: ctx.accounts.worker.key(),
+            worker_payment,
+            platform_fee,
+            worker_new_score: worker_rep.reputation_score,
+            poster_new_score: poster_rep.reputation_score,
+        });
+
+        Ok(())
+    }
+
+    // ============== PHASE 3: MULTI-ARBITRATOR DISPUTES ==============
+
+    /// Initialize the arbitrator pool (platform only, one-time)
+    pub fn init_arbitrator_pool(ctx: Context<InitArbitratorPool>) -> Result<()> {
+        let pool = &mut ctx.accounts.pool;
+        pool.authority = ctx.accounts.authority.key();
+        pool.arbitrators = Vec::new();
+        pool.min_stake = MIN_ARBITRATOR_STAKE;
+        pool.bump = ctx.bumps.pool;
+
+        emit!(ArbitratorPoolInitialized {
+            authority: ctx.accounts.authority.key(),
+        });
+
+        Ok(())
+    }
+
+    /// Register as an arbitrator (requires stake)
+    pub fn register_arbitrator(ctx: Context<RegisterArbitrator>) -> Result<()> {
+        let pool = &mut ctx.accounts.pool;
+        let arbitrator = &mut ctx.accounts.arbitrator_account;
+        let agent_key = ctx.accounts.agent.key();
+
+        require!(pool.arbitrators.len() < MAX_ARBITRATORS, EscrowError::ArbitratorPoolFull);
+        require!(!pool.arbitrators.contains(&agent_key), EscrowError::AlreadyArbitrator);
+
+        // Transfer stake from agent to arbitrator account
+        let transfer_ix = anchor_lang::solana_program::system_instruction::transfer(
+            &agent_key,
+            &arbitrator.key(),
+            MIN_ARBITRATOR_STAKE,
+        );
+        anchor_lang::solana_program::program::invoke(
+            &transfer_ix,
+            &[
+                ctx.accounts.agent.to_account_info(),
+                arbitrator.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+            ],
+        )?;
+
+        arbitrator.agent = agent_key;
+        arbitrator.stake = MIN_ARBITRATOR_STAKE;
+        arbitrator.cases_voted = 0;
+        arbitrator.cases_correct = 0;
+        arbitrator.is_active = true;
+        arbitrator.registered_at = Clock::get()?.unix_timestamp;
+        arbitrator.bump = ctx.bumps.arbitrator_account;
+
+        pool.arbitrators.push(agent_key);
+
+        emit!(ArbitratorRegistered {
+            agent: agent_key,
+            stake: MIN_ARBITRATOR_STAKE,
+        });
+
+        Ok(())
+    }
+
+    /// Unregister as arbitrator and reclaim stake
+    pub fn unregister_arbitrator(ctx: Context<UnregisterArbitrator>) -> Result<()> {
+        let pool = &mut ctx.accounts.pool;
+        let arbitrator = &mut ctx.accounts.arbitrator_account;
+        let agent_key = ctx.accounts.agent.key();
+
+        require!(arbitrator.is_active, EscrowError::ArbitratorNotActive);
+        
+        // Remove from pool
+        if let Some(pos) = pool.arbitrators.iter().position(|x| *x == agent_key) {
+            pool.arbitrators.remove(pos);
+        }
+
+        arbitrator.is_active = false;
+
+        // Return stake
+        let stake = arbitrator.stake;
+        **arbitrator.to_account_info().try_borrow_mut_lamports()? -= stake;
+        **ctx.accounts.agent.to_account_info().try_borrow_mut_lamports()? += stake;
+
+        emit!(ArbitratorUnregistered {
+            agent: agent_key,
+            stake_returned: stake,
+        });
+
+        Ok(())
+    }
+
+    /// Raise a dispute case - selects 5 random arbitrators
+    pub fn raise_dispute_case(ctx: Context<RaiseDisputeCase>, reason: String) -> Result<()> {
+        let escrow = &mut ctx.accounts.escrow;
+        let dispute_case = &mut ctx.accounts.dispute_case;
+        let pool = &ctx.accounts.pool;
+        let clock = Clock::get()?;
+
+        require!(
+            escrow.status == EscrowStatus::Active || escrow.status == EscrowStatus::PendingReview,
+            EscrowError::EscrowNotActive
+        );
+        require!(reason.len() <= 500, EscrowError::ReasonTooLong);
+        require!(pool.arbitrators.len() >= ARBITRATORS_PER_DISPUTE, EscrowError::NotEnoughArbitrators);
+
+        // Select 5 arbitrators pseudo-randomly based on clock + escrow data
+        let seed = clock.unix_timestamp as u64 ^ escrow.amount;
+        let mut selected: Vec<Pubkey> = Vec::with_capacity(ARBITRATORS_PER_DISPUTE);
+        let mut used_indices: Vec<usize> = Vec::new();
+        
+        for i in 0..ARBITRATORS_PER_DISPUTE {
+            let mut idx = ((seed.wrapping_add(i as u64).wrapping_mul(31337)) as usize) % pool.arbitrators.len();
+            while used_indices.contains(&idx) {
+                idx = (idx + 1) % pool.arbitrators.len();
+            }
+            used_indices.push(idx);
+            selected.push(pool.arbitrators[idx]);
+        }
+
+        escrow.status = EscrowStatus::InArbitration;
+        escrow.dispute_case = Some(dispute_case.key());
+
+        dispute_case.escrow = escrow.key();
+        dispute_case.raised_by = ctx.accounts.initiator.key();
+        dispute_case.reason = reason.clone();
+        dispute_case.arbitrators = [selected[0], selected[1], selected[2], selected[3], selected[4]];
+        dispute_case.votes = [None, None, None, None, None];
+        dispute_case.voting_deadline = clock.unix_timestamp + ARBITRATION_VOTING_SECONDS;
+        dispute_case.resolution = None;
+        dispute_case.created_at = clock.unix_timestamp;
+        dispute_case.bump = ctx.bumps.dispute_case;
+
+        emit!(DisputeCaseRaised {
+            escrow: escrow.key(),
+            raised_by: ctx.accounts.initiator.key(),
+            arbitrators: dispute_case.arbitrators,
+            voting_deadline: dispute_case.voting_deadline,
+            reason,
+        });
+
+        Ok(())
+    }
+
+    /// Cast a vote on a dispute case
+    pub fn cast_arbitration_vote(ctx: Context<CastArbitrationVote>, vote: Vote) -> Result<()> {
+        let dispute_case = &mut ctx.accounts.dispute_case;
+        let arbitrator_account = &mut ctx.accounts.arbitrator_account;
+        let voter_key = ctx.accounts.voter.key();
+        let clock = Clock::get()?;
+
+        require!(dispute_case.resolution.is_none(), EscrowError::DisputeAlreadyResolved);
+        require!(clock.unix_timestamp < dispute_case.voting_deadline, EscrowError::VotingDeadlinePassed);
+
+        // Find voter's position in arbitrators array
+        let position = dispute_case.arbitrators.iter()
+            .position(|&arb| arb == voter_key)
+            .ok_or(EscrowError::NotSelectedArbitrator)?;
+
+        require!(dispute_case.votes[position].is_none(), EscrowError::AlreadyVoted);
+
+        dispute_case.votes[position] = Some(vote);
+        arbitrator_account.cases_voted += 1;
+
+        emit!(ArbitrationVoteCast {
+            dispute_case: dispute_case.key(),
+            arbitrator: voter_key,
+            vote,
+        });
+
+        Ok(())
+    }
+
+    /// Finalize dispute after voting (anyone can call after deadline or when majority reached)
+    pub fn finalize_dispute_case(ctx: Context<FinalizeDisputeCase>) -> Result<()> {
+        let dispute_case = &mut ctx.accounts.dispute_case;
+        let escrow = &mut ctx.accounts.escrow;
+        let clock = Clock::get()?;
+
+        require!(dispute_case.resolution.is_none(), EscrowError::DisputeAlreadyResolved);
+
+        // Count votes
+        let mut for_worker = 0u8;
+        let mut for_poster = 0u8;
+        for vote in dispute_case.votes.iter() {
+            match vote {
+                Some(Vote::ForWorker) => for_worker += 1,
+                Some(Vote::ForPoster) => for_poster += 1,
+                None => {}
+            }
+        }
+
+        let total_votes = for_worker + for_poster;
+        let has_majority = for_worker >= ARBITRATION_MAJORITY as u8 || for_poster >= ARBITRATION_MAJORITY as u8;
+        let deadline_passed = clock.unix_timestamp >= dispute_case.voting_deadline;
+
+        require!(has_majority || deadline_passed, EscrowError::VotingNotComplete);
+
+        // Determine resolution
+        let resolution = if for_worker > for_poster {
+            DisputeResolution::WorkerWins
+        } else if for_poster > for_worker {
+            DisputeResolution::PosterWins
+        } else {
+            DisputeResolution::Split
+        };
+
+        dispute_case.resolution = Some(resolution);
+
+        // Update escrow status based on resolution
+        escrow.status = match resolution {
+            DisputeResolution::WorkerWins => EscrowStatus::DisputeWorkerWins,
+            DisputeResolution::PosterWins => EscrowStatus::DisputePosterWins,
+            DisputeResolution::Split => EscrowStatus::DisputeSplit,
+        };
+
+        emit!(DisputeCaseFinalized {
+            dispute_case: dispute_case.key(),
+            resolution,
+            votes_for_worker: for_worker,
+            votes_for_poster: for_poster,
+        });
+
+        Ok(())
+    }
+
+    /// Execute dispute resolution - transfer funds based on outcome
+    pub fn execute_dispute_resolution(ctx: Context<ExecuteDisputeResolution>) -> Result<()> {
+        let dispute_case = &ctx.accounts.dispute_case;
+        let escrow = &mut ctx.accounts.escrow;
+
+        let resolution = dispute_case.resolution.ok_or(EscrowError::DisputeNotResolved)?;
+        
+        require!(
+            escrow.status == EscrowStatus::DisputeWorkerWins ||
+            escrow.status == EscrowStatus::DisputePosterWins ||
+            escrow.status == EscrowStatus::DisputeSplit,
+            EscrowError::InvalidStatusForExecution
+        );
+
+        let amount = escrow.amount;
+        let escrow_info = escrow.to_account_info();
+        let rent = Rent::get()?.minimum_balance(escrow_info.data_len());
+        let escrow_lamports = **escrow_info.try_borrow_lamports()?;
+        let available = escrow_lamports.saturating_sub(rent);
+        require!(available >= amount, EscrowError::InsufficientFunds);
+
+        match resolution {
+            DisputeResolution::WorkerWins => {
+                let platform_fee = amount / 100;
+                let worker_payment = amount - platform_fee;
+                
+                **escrow.to_account_info().try_borrow_mut_lamports()? -= worker_payment;
+                **ctx.accounts.worker.to_account_info().try_borrow_mut_lamports()? += worker_payment;
+                
+                **escrow.to_account_info().try_borrow_mut_lamports()? -= platform_fee;
+                **ctx.accounts.platform.to_account_info().try_borrow_mut_lamports()? += platform_fee;
+
+                escrow.status = EscrowStatus::Released;
+            }
+            DisputeResolution::PosterWins => {
+                **escrow.to_account_info().try_borrow_mut_lamports()? -= amount;
+                **ctx.accounts.poster.to_account_info().try_borrow_mut_lamports()? += amount;
+
+                escrow.status = EscrowStatus::Refunded;
+            }
+            DisputeResolution::Split => {
+                let half = amount / 2;
+                let platform_fee = half / 100;
+                let worker_half = half - platform_fee;
+                let poster_half = amount - half;
+
+                **escrow.to_account_info().try_borrow_mut_lamports()? -= worker_half;
+                **ctx.accounts.worker.to_account_info().try_borrow_mut_lamports()? += worker_half;
+
+                **escrow.to_account_info().try_borrow_mut_lamports()? -= poster_half;
+                **ctx.accounts.poster.to_account_info().try_borrow_mut_lamports()? += poster_half;
+
+                **escrow.to_account_info().try_borrow_mut_lamports()? -= platform_fee;
+                **ctx.accounts.platform.to_account_info().try_borrow_mut_lamports()? += platform_fee;
+
+                escrow.status = EscrowStatus::Released;
+            }
+        }
+
+        emit!(DisputeResolutionExecuted {
+            escrow: escrow.key(),
+            resolution,
+            amount,
+        });
+
+        Ok(())
+    }
+}
+
+// ============== HELPER FUNCTIONS ==============
+
+fn calculate_reputation_score(rep: &AgentReputation) -> i64 {
+    let base = (rep.jobs_completed as i64) * 10;
+    let dispute_bonus = (rep.disputes_won as i64) * 5;
+    let dispute_penalty = (rep.disputes_lost as i64) * 10;
+    base + dispute_bonus - dispute_penalty
 }
 
 // ============== ACCOUNTS ==============
 
 #[derive(Accounts)]
-#[instruction(job_id: String)]
+#[instruction(job_id: String, job_id_hash: [u8; 32])]
 pub struct CreateEscrow<'info> {
     #[account(
         init,
         payer = poster,
         space = 8 + Escrow::INIT_SPACE,
-        // Hash job_id to 32 bytes for PDA (UUIDs are 36 bytes, exceeds 32-byte seed limit)
-        seeds = [b"escrow", sha256_hash(job_id.as_bytes()).as_ref(), poster.key().as_ref()],
+        seeds = [b"escrow", job_id_hash.as_ref(), poster.key().as_ref()],
         bump
     )]
     pub escrow: Account<'info, Escrow>,
@@ -444,7 +817,6 @@ pub struct CreateEscrow<'info> {
 pub struct AssignWorker<'info> {
     #[account(mut)]
     pub escrow: Account<'info, Escrow>,
-    /// Must be either the poster or platform authority
     #[account(
         constraint = initiator.key() == escrow.poster || initiator.key() == PLATFORM_WALLET 
             @ EscrowError::Unauthorized
@@ -456,10 +828,9 @@ pub struct AssignWorker<'info> {
 pub struct ReleaseToWorker<'info> {
     #[account(mut)]
     pub escrow: Account<'info, Escrow>,
-    /// Platform authority MUST sign releases
     #[account(address = PLATFORM_WALLET @ EscrowError::NotPlatformAuthority)]
     pub platform_authority: Signer<'info>,
-    /// CHECK: Worker receives payment, verified against escrow.worker
+    /// CHECK: Worker receives payment
     #[account(mut)]
     pub worker: AccountInfo<'info>,
     /// CHECK: Platform wallet receives 1% fee
@@ -471,7 +842,6 @@ pub struct ReleaseToWorker<'info> {
 pub struct InitiateDispute<'info> {
     #[account(mut)]
     pub escrow: Account<'info, Escrow>,
-    /// Must be poster or platform authority
     #[account(
         constraint = initiator.key() == escrow.poster || initiator.key() == PLATFORM_WALLET 
             @ EscrowError::Unauthorized
@@ -483,10 +853,9 @@ pub struct InitiateDispute<'info> {
 pub struct RefundToPoster<'info> {
     #[account(mut)]
     pub escrow: Account<'info, Escrow>,
-    /// Platform authority MUST sign refunds
     #[account(address = PLATFORM_WALLET @ EscrowError::NotPlatformAuthority)]
     pub platform_authority: Signer<'info>,
-    /// CHECK: Poster receives refund, verified against escrow.poster
+    /// CHECK: Poster receives refund
     #[account(mut, address = escrow.poster @ EscrowError::PosterMismatch)]
     pub poster: AccountInfo<'info>,
 }
@@ -495,7 +864,6 @@ pub struct RefundToPoster<'info> {
 pub struct ClaimExpired<'info> {
     #[account(mut)]
     pub escrow: Account<'info, Escrow>,
-    /// Poster can claim their expired escrow
     #[account(mut, address = escrow.poster @ EscrowError::PosterMismatch)]
     pub poster: Signer<'info>,
 }
@@ -504,7 +872,6 @@ pub struct ClaimExpired<'info> {
 pub struct CancelEscrow<'info> {
     #[account(mut)]
     pub escrow: Account<'info, Escrow>,
-    /// Only poster can cancel
     #[account(mut, address = escrow.poster @ EscrowError::PosterMismatch)]
     pub poster: Signer<'info>,
 }
@@ -527,7 +894,6 @@ pub struct CloseEscrow<'info> {
 pub struct SubmitWork<'info> {
     #[account(mut)]
     pub escrow: Account<'info, Escrow>,
-    /// Worker must sign to submit their work
     #[account(address = escrow.worker @ EscrowError::WorkerMismatch)]
     pub worker: Signer<'info>,
 }
@@ -536,10 +902,9 @@ pub struct SubmitWork<'info> {
 pub struct ApproveWork<'info> {
     #[account(mut)]
     pub escrow: Account<'info, Escrow>,
-    /// Poster approves the work
     #[account(address = escrow.poster @ EscrowError::PosterMismatch)]
     pub poster: Signer<'info>,
-    /// CHECK: Worker receives payment, verified against escrow.worker
+    /// CHECK: Worker receives payment
     #[account(mut, address = escrow.worker @ EscrowError::WorkerMismatch)]
     pub worker: AccountInfo<'info>,
     /// CHECK: Platform wallet receives 1% fee
@@ -551,9 +916,8 @@ pub struct ApproveWork<'info> {
 pub struct AutoRelease<'info> {
     #[account(mut)]
     pub escrow: Account<'info, Escrow>,
-    /// Anyone can crank the auto-release after review window
     pub cranker: Signer<'info>,
-    /// CHECK: Worker receives payment, verified against escrow.worker
+    /// CHECK: Worker receives payment
     #[account(mut, address = escrow.worker @ EscrowError::WorkerMismatch)]
     pub worker: AccountInfo<'info>,
     /// CHECK: Platform wallet receives 1% fee
@@ -561,52 +925,281 @@ pub struct AutoRelease<'info> {
     pub platform: AccountInfo<'info>,
 }
 
+// ============== PHASE 2 ACCOUNTS ==============
+
+#[derive(Accounts)]
+pub struct InitReputation<'info> {
+    #[account(
+        init,
+        payer = payer,
+        space = 8 + AgentReputation::INIT_SPACE,
+        seeds = [b"reputation", agent.key().as_ref()],
+        bump
+    )]
+    pub reputation: Account<'info, AgentReputation>,
+    /// CHECK: Agent whose reputation is being initialized
+    pub agent: AccountInfo<'info>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct ReleaseWithReputation<'info> {
+    #[account(mut)]
+    pub escrow: Account<'info, Escrow>,
+    #[account(address = PLATFORM_WALLET @ EscrowError::NotPlatformAuthority)]
+    pub platform_authority: Signer<'info>,
+    /// CHECK: Worker receives payment
+    #[account(mut, address = escrow.worker @ EscrowError::WorkerMismatch)]
+    pub worker: AccountInfo<'info>,
+    /// CHECK: Platform wallet receives 1% fee
+    #[account(mut, address = PLATFORM_WALLET)]
+    pub platform: AccountInfo<'info>,
+    #[account(
+        mut,
+        seeds = [b"reputation", escrow.worker.as_ref()],
+        bump = worker_reputation.bump
+    )]
+    pub worker_reputation: Account<'info, AgentReputation>,
+    #[account(
+        mut,
+        seeds = [b"reputation", escrow.poster.as_ref()],
+        bump = poster_reputation.bump
+    )]
+    pub poster_reputation: Account<'info, AgentReputation>,
+}
+
+// ============== PHASE 3 ACCOUNTS ==============
+
+#[derive(Accounts)]
+pub struct InitArbitratorPool<'info> {
+    #[account(
+        init,
+        payer = authority,
+        space = 8 + ArbitratorPool::INIT_SPACE,
+        seeds = [b"arbitrator_pool"],
+        bump
+    )]
+    pub pool: Account<'info, ArbitratorPool>,
+    #[account(mut, address = PLATFORM_WALLET @ EscrowError::NotPlatformAuthority)]
+    pub authority: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct RegisterArbitrator<'info> {
+    #[account(
+        mut,
+        seeds = [b"arbitrator_pool"],
+        bump = pool.bump
+    )]
+    pub pool: Account<'info, ArbitratorPool>,
+    #[account(
+        init,
+        payer = agent,
+        space = 8 + Arbitrator::INIT_SPACE,
+        seeds = [b"arbitrator", agent.key().as_ref()],
+        bump
+    )]
+    pub arbitrator_account: Account<'info, Arbitrator>,
+    #[account(mut)]
+    pub agent: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct UnregisterArbitrator<'info> {
+    #[account(
+        mut,
+        seeds = [b"arbitrator_pool"],
+        bump = pool.bump
+    )]
+    pub pool: Account<'info, ArbitratorPool>,
+    #[account(
+        mut,
+        seeds = [b"arbitrator", agent.key().as_ref()],
+        bump = arbitrator_account.bump,
+        constraint = arbitrator_account.agent == agent.key() @ EscrowError::Unauthorized
+    )]
+    pub arbitrator_account: Account<'info, Arbitrator>,
+    #[account(mut)]
+    pub agent: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct RaiseDisputeCase<'info> {
+    #[account(mut)]
+    pub escrow: Account<'info, Escrow>,
+    #[account(
+        init,
+        payer = initiator,
+        space = 8 + DisputeCase::INIT_SPACE,
+        seeds = [b"dispute", escrow.key().as_ref()],
+        bump
+    )]
+    pub dispute_case: Account<'info, DisputeCase>,
+    #[account(
+        seeds = [b"arbitrator_pool"],
+        bump = pool.bump
+    )]
+    pub pool: Account<'info, ArbitratorPool>,
+    #[account(
+        mut,
+        constraint = initiator.key() == escrow.poster || initiator.key() == escrow.worker 
+            @ EscrowError::Unauthorized
+    )]
+    pub initiator: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct CastArbitrationVote<'info> {
+    #[account(mut)]
+    pub dispute_case: Account<'info, DisputeCase>,
+    #[account(
+        mut,
+        seeds = [b"arbitrator", voter.key().as_ref()],
+        bump = arbitrator_account.bump,
+        constraint = arbitrator_account.agent == voter.key() @ EscrowError::Unauthorized,
+        constraint = arbitrator_account.is_active @ EscrowError::ArbitratorNotActive
+    )]
+    pub arbitrator_account: Account<'info, Arbitrator>,
+    pub voter: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct FinalizeDisputeCase<'info> {
+    #[account(mut)]
+    pub dispute_case: Account<'info, DisputeCase>,
+    #[account(
+        mut,
+        constraint = escrow.key() == dispute_case.escrow @ EscrowError::EscrowMismatch
+    )]
+    pub escrow: Account<'info, Escrow>,
+    /// Anyone can finalize after deadline or majority
+    pub finalizer: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct ExecuteDisputeResolution<'info> {
+    #[account(
+        constraint = dispute_case.escrow == escrow.key() @ EscrowError::EscrowMismatch
+    )]
+    pub dispute_case: Account<'info, DisputeCase>,
+    #[account(mut)]
+    pub escrow: Account<'info, Escrow>,
+    /// CHECK: Worker may receive funds
+    #[account(mut, address = escrow.worker @ EscrowError::WorkerMismatch)]
+    pub worker: AccountInfo<'info>,
+    /// CHECK: Poster may receive refund
+    #[account(mut, address = escrow.poster @ EscrowError::PosterMismatch)]
+    pub poster: AccountInfo<'info>,
+    /// CHECK: Platform wallet receives fee
+    #[account(mut, address = PLATFORM_WALLET)]
+    pub platform: AccountInfo<'info>,
+    /// Anyone can execute after finalization
+    pub executor: Signer<'info>,
+}
+
 // ============== STATE ==============
 
 #[account]
 #[derive(InitSpace)]
 pub struct Escrow {
-    /// Job poster who deposited funds
     pub poster: Pubkey,
-    /// Assigned worker (default if unassigned)
     pub worker: Pubkey,
-    /// Unique job identifier
     #[max_len(64)]
     pub job_id: String,
-    /// Escrowed amount in lamports
     pub amount: u64,
-    /// Current status
     pub status: EscrowStatus,
-    /// Creation timestamp
     pub created_at: i64,
-    /// Expiry timestamp (poster can reclaim after)
     pub expires_at: i64,
-    /// When dispute was initiated (for timelock)
     pub dispute_initiated_at: Option<i64>,
-    /// When worker submitted work (starts review window) - Phase 1
     pub submitted_at: Option<i64>,
-    /// Optional proof of work hash - Phase 1
     pub proof_hash: Option<[u8; 32]>,
-    /// PDA bump seed
+    pub dispute_case: Option<Pubkey>,
+    pub bump: u8,
+}
+
+#[account]
+#[derive(InitSpace)]
+pub struct AgentReputation {
+    pub agent: Pubkey,
+    pub jobs_completed: u64,
+    pub jobs_posted: u64,
+    pub total_earned: u64,
+    pub total_spent: u64,
+    pub disputes_won: u64,
+    pub disputes_lost: u64,
+    pub reputation_score: i64,
+    pub created_at: i64,
+    pub bump: u8,
+}
+
+#[account]
+#[derive(InitSpace)]
+pub struct ArbitratorPool {
+    pub authority: Pubkey,
+    #[max_len(100)]
+    pub arbitrators: Vec<Pubkey>,
+    pub min_stake: u64,
+    pub bump: u8,
+}
+
+#[account]
+#[derive(InitSpace)]
+pub struct Arbitrator {
+    pub agent: Pubkey,
+    pub stake: u64,
+    pub cases_voted: u64,
+    pub cases_correct: u64,
+    pub is_active: bool,
+    pub registered_at: i64,
+    pub bump: u8,
+}
+
+#[account]
+#[derive(InitSpace)]
+pub struct DisputeCase {
+    pub escrow: Pubkey,
+    pub raised_by: Pubkey,
+    #[max_len(500)]
+    pub reason: String,
+    pub arbitrators: [Pubkey; 5],
+    pub votes: [Option<Vote>; 5],
+    pub voting_deadline: i64,
+    pub resolution: Option<DisputeResolution>,
+    pub created_at: i64,
     pub bump: u8,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, InitSpace)]
 pub enum EscrowStatus {
-    /// Funds deposited, awaiting job completion
     Active,
-    /// Funds released to worker
     Released,
-    /// Funds refunded to poster
     Refunded,
-    /// Escrow expired, poster reclaimed
     Expired,
-    /// Under dispute (starts timelock)
     Disputed,
-    /// Cancelled before worker assigned
     Cancelled,
-    /// Worker submitted, awaiting poster review (Phase 1)
     PendingReview,
+    InArbitration,
+    DisputeWorkerWins,
+    DisputePosterWins,
+    DisputeSplit,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, InitSpace)]
+pub enum Vote {
+    ForWorker,
+    ForPoster,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, InitSpace)]
+pub enum DisputeResolution {
+    WorkerWins,
+    PosterWins,
+    Split,
 }
 
 // ============== EVENTS ==============
@@ -665,8 +1258,6 @@ pub struct EscrowClosed {
     pub job_id: String,
 }
 
-// ============== PHASE 1 EVENTS ==============
-
 #[event]
 pub struct WorkSubmitted {
     pub job_id: String,
@@ -691,6 +1282,69 @@ pub struct WorkAutoReleased {
     pub worker_payment: u64,
     pub platform_fee: u64,
     pub triggered_by: Pubkey,
+}
+
+#[event]
+pub struct ReputationInitialized {
+    pub agent: Pubkey,
+}
+
+#[event]
+pub struct FundsReleasedWithReputation {
+    pub job_id: String,
+    pub worker: Pubkey,
+    pub worker_payment: u64,
+    pub platform_fee: u64,
+    pub worker_new_score: i64,
+    pub poster_new_score: i64,
+}
+
+#[event]
+pub struct ArbitratorPoolInitialized {
+    pub authority: Pubkey,
+}
+
+#[event]
+pub struct ArbitratorRegistered {
+    pub agent: Pubkey,
+    pub stake: u64,
+}
+
+#[event]
+pub struct ArbitratorUnregistered {
+    pub agent: Pubkey,
+    pub stake_returned: u64,
+}
+
+#[event]
+pub struct DisputeCaseRaised {
+    pub escrow: Pubkey,
+    pub raised_by: Pubkey,
+    pub arbitrators: [Pubkey; 5],
+    pub voting_deadline: i64,
+    pub reason: String,
+}
+
+#[event]
+pub struct ArbitrationVoteCast {
+    pub dispute_case: Pubkey,
+    pub arbitrator: Pubkey,
+    pub vote: Vote,
+}
+
+#[event]
+pub struct DisputeCaseFinalized {
+    pub dispute_case: Pubkey,
+    pub resolution: DisputeResolution,
+    pub votes_for_worker: u8,
+    pub votes_for_poster: u8,
+}
+
+#[event]
+pub struct DisputeResolutionExecuted {
+    pub escrow: Pubkey,
+    pub resolution: DisputeResolution,
+    pub amount: u64,
 }
 
 // ============== ERRORS ==============
@@ -729,11 +1383,39 @@ pub enum EscrowError {
     CannotClose,
     #[msg("Insufficient funds in escrow")]
     InsufficientFunds,
-    // Phase 1 errors
     #[msg("Escrow is not in pending review state")]
     NotPendingReview,
     #[msg("No submission timestamp recorded")]
     NoSubmissionTime,
     #[msg("Review window has not expired yet (24h required)")]
     ReviewWindowNotExpired,
+    // Phase 3 errors
+    #[msg("Arbitrator pool is full (max 100)")]
+    ArbitratorPoolFull,
+    #[msg("Already registered as arbitrator")]
+    AlreadyArbitrator,
+    #[msg("Arbitrator is not active")]
+    ArbitratorNotActive,
+    #[msg("Not enough arbitrators in pool (need 5)")]
+    NotEnoughArbitrators,
+    #[msg("Reason too long (max 500 chars)")]
+    ReasonTooLong,
+    #[msg("Not selected as arbitrator for this case")]
+    NotSelectedArbitrator,
+    #[msg("Already voted on this dispute")]
+    AlreadyVoted,
+    #[msg("Dispute already resolved")]
+    DisputeAlreadyResolved,
+    #[msg("Voting deadline has passed")]
+    VotingDeadlinePassed,
+    #[msg("Voting not complete (no majority and deadline not passed)")]
+    VotingNotComplete,
+    #[msg("Dispute not yet resolved")]
+    DisputeNotResolved,
+    #[msg("Escrow mismatch")]
+    EscrowMismatch,
+    #[msg("Invalid status for execution")]
+    InvalidStatusForExecution,
+    #[msg("Job ID hash does not match provided job ID")]
+    HashMismatch,
 }
