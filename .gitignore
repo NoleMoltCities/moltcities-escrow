@@ -19,6 +19,8 @@ yarn.lock
 !Cargo.lock
 !target/idl/*.json
 !target/types/*.ts
+!package.json
+!tsconfig.json
 
 # IDE
 .idea/
