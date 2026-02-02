@@ -34,6 +34,12 @@ pub const ARBITRATOR_VOTE_FEE: u64 = 1_000_000;
 /// Maximum arbitrators in pool
 pub const MAX_ARBITRATORS: usize = 100;
 
+/// Minimum escrow amount (0.01 SOL) - prevents spam
+pub const MIN_ESCROW_AMOUNT: u64 = 10_000_000;
+
+/// Grace period after arbitration expiry before emergency release (48 hours)
+pub const ARBITRATION_GRACE_PERIOD: i64 = 48 * 60 * 60;
+
 #[program]
 pub mod job_escrow {
     use super::*;
@@ -52,7 +58,7 @@ pub mod job_escrow {
         amount: u64,
         expiry_seconds: Option<i64>,
     ) -> Result<()> {
-        require!(amount > 0, EscrowError::InvalidAmount);
+        require!(amount >= MIN_ESCROW_AMOUNT, EscrowError::AmountTooLow);
         require!(job_id.len() <= 64, EscrowError::JobIdTooLong);
         
         // Verify the provided hash matches the job_id
@@ -597,13 +603,32 @@ pub mod job_escrow {
         require!(reason.len() <= 500, EscrowError::ReasonTooLong);
         require!(pool.arbitrators.len() >= ARBITRATORS_PER_DISPUTE, EscrowError::NotEnoughArbitrators);
 
-        // Select 5 arbitrators pseudo-randomly based on clock + escrow data
-        let seed = clock.unix_timestamp as u64 ^ escrow.amount;
+        // Select 5 arbitrators with improved randomness (H-1 fix)
+        // Seed includes: escrow key, slot, initiator, timestamp, amount
+        // This makes gaming arbitrator selection significantly harder
+        let escrow_bytes = escrow.key().to_bytes();
+        let initiator_bytes = ctx.accounts.initiator.key().to_bytes();
+        let slot_bytes = clock.slot.to_le_bytes();
+        let ts_bytes = clock.unix_timestamp.to_le_bytes();
+        let amt_bytes = escrow.amount.to_le_bytes();
+        
+        // Combine multiple entropy sources
+        let mut seed_data = [0u8; 32];
+        for i in 0..8 { seed_data[i] = escrow_bytes[i] ^ initiator_bytes[i]; }
+        for i in 0..8 { seed_data[8 + i] = slot_bytes[i] ^ escrow_bytes[16 + i]; }
+        for i in 0..8 { seed_data[16 + i] = ts_bytes[i] ^ initiator_bytes[16 + i]; }
+        for i in 0..8 { seed_data[24 + i] = amt_bytes[i] ^ escrow_bytes[24 + i]; }
+        
+        let seed_hash = sha256_hash(&seed_data);
+        let seed = u64::from_le_bytes(seed_hash.as_ref()[0..8].try_into().unwrap());
+        
         let mut selected: Vec<Pubkey> = Vec::with_capacity(ARBITRATORS_PER_DISPUTE);
         let mut used_indices: Vec<usize> = Vec::new();
         
         for i in 0..ARBITRATORS_PER_DISPUTE {
-            let mut idx = ((seed.wrapping_add(i as u64).wrapping_mul(31337)) as usize) % pool.arbitrators.len();
+            let mut idx = ((seed.wrapping_add(i as u64).wrapping_mul(31337).wrapping_add(
+                u64::from_le_bytes(seed_hash.as_ref()[8..16].try_into().unwrap())
+            )) as usize) % pool.arbitrators.len();
             while used_indices.contains(&idx) {
                 idx = (idx + 1) % pool.arbitrators.len();
             }
@@ -771,10 +796,11 @@ pub mod job_escrow {
                 escrow.status = EscrowStatus::Refunded;
             }
             DisputeResolution::Split => {
-                let half = amount / 2;
-                let platform_fee = half / 100;
-                let worker_half = half - platform_fee;
-                let poster_half = amount - half;
+                // Symmetric fee: take 1% from total, THEN split remainder equally
+                let platform_fee = amount / 100;
+                let remaining = amount - platform_fee;
+                let worker_half = remaining / 2;
+                let poster_half = remaining - worker_half; // Handles odd amounts
 
                 **escrow.to_account_info().try_borrow_mut_lamports()? -= worker_half;
                 **ctx.accounts.worker.to_account_info().try_borrow_mut_lamports()? += worker_half;
@@ -806,11 +832,12 @@ pub mod job_escrow {
         Ok(())
     }
 
-    /// Update arbitrator accuracy after dispute resolution
-    /// Call once per arbitrator who voted - updates cases_correct if they voted with majority
+    /// Update arbitrator accuracy after dispute resolution (C-1 fix)
+    /// Creates AccuracyClaim PDA to prevent duplicate calls
     pub fn update_arbitrator_accuracy(ctx: Context<UpdateArbitratorAccuracy>) -> Result<()> {
         let dispute_case = &ctx.accounts.dispute_case;
         let arbitrator = &mut ctx.accounts.arbitrator_account;
+        let accuracy_claim = &mut ctx.accounts.accuracy_claim;
         let arbitrator_key = arbitrator.agent;
 
         let resolution = dispute_case.resolution.ok_or(EscrowError::DisputeNotResolved)?;
@@ -822,10 +849,12 @@ pub mod job_escrow {
 
         let vote = dispute_case.votes[position].ok_or(EscrowError::ArbitratorDidNotVote)?;
 
-        // Check if arbitrator already got credit for this case
-        // We track this by marking the escrow in the dispute case as "processed" for this arbitrator
-        // Since we can't modify dispute_case here, we rely on the caller to not call twice
-        // In practice, the frontend/crank should track this
+        // AccuracyClaim PDA being created proves this is the first call
+        // If called again, the PDA init will fail with "already initialized"
+        accuracy_claim.dispute_case = dispute_case.key();
+        accuracy_claim.arbitrator = arbitrator_key;
+        accuracy_claim.claimed_at = Clock::get()?.unix_timestamp;
+        accuracy_claim.bump = ctx.bumps.accuracy_claim;
 
         // Determine if vote matched the resolution
         let voted_correctly = match (vote, resolution) {
@@ -846,6 +875,77 @@ pub mod job_escrow {
             voted_correctly,
             cases_correct: arbitrator.cases_correct,
             cases_voted: arbitrator.cases_voted,
+        });
+
+        Ok(())
+    }
+
+    /// Emergency release for expired arbitrations (H-2 fix)
+    /// If arbitration extends past escrow expiry + grace period, poster can reclaim funds
+    pub fn claim_expired_arbitration(ctx: Context<ClaimExpiredArbitration>) -> Result<()> {
+        let escrow = &mut ctx.accounts.escrow;
+        let clock = Clock::get()?;
+
+        require!(
+            escrow.status == EscrowStatus::InArbitration,
+            EscrowError::NotInArbitration
+        );
+        
+        // Must be past expiry + grace period
+        let emergency_deadline = escrow.expires_at + ARBITRATION_GRACE_PERIOD;
+        require!(
+            clock.unix_timestamp >= emergency_deadline,
+            EscrowError::ArbitrationGracePeriodNotPassed
+        );
+
+        let amount = escrow.amount;
+        let escrow_info = escrow.to_account_info();
+        let rent = Rent::get()?.minimum_balance(escrow_info.data_len());
+        let escrow_lamports = **escrow_info.try_borrow_lamports()?;
+        let available = escrow_lamports.saturating_sub(rent);
+
+        require!(available >= amount, EscrowError::InsufficientFunds);
+
+        // Return funds to poster (no fee for emergency release)
+        **escrow.to_account_info().try_borrow_mut_lamports()? -= amount;
+        **ctx.accounts.poster.to_account_info().try_borrow_mut_lamports()? += amount;
+
+        escrow.status = EscrowStatus::Refunded;
+
+        emit!(ExpiredArbitrationClaimed {
+            job_id: escrow.job_id.clone(),
+            poster: ctx.accounts.poster.key(),
+            amount,
+        });
+
+        Ok(())
+    }
+
+    /// Remove an arbitrator from the pool (platform authority only)
+    /// Returns their stake - use for bad actors
+    pub fn remove_arbitrator(ctx: Context<RemoveArbitrator>) -> Result<()> {
+        let pool = &mut ctx.accounts.pool;
+        let arbitrator = &mut ctx.accounts.arbitrator_account;
+        let agent_key = arbitrator.agent;
+
+        require!(arbitrator.is_active, EscrowError::ArbitratorNotActive);
+        
+        // Remove from pool
+        if let Some(pos) = pool.arbitrators.iter().position(|x| *x == agent_key) {
+            pool.arbitrators.remove(pos);
+        }
+
+        arbitrator.is_active = false;
+
+        // Return stake to the arbitrator
+        let stake = arbitrator.stake;
+        **arbitrator.to_account_info().try_borrow_mut_lamports()? -= stake;
+        **ctx.accounts.arbitrator_agent.to_account_info().try_borrow_mut_lamports()? += stake;
+
+        emit!(ArbitratorRemoved {
+            agent: agent_key,
+            removed_by: ctx.accounts.authority.key(),
+            stake_returned: stake,
         });
 
         Ok(())
@@ -1236,8 +1336,58 @@ pub struct UpdateArbitratorAccuracy<'info> {
         bump = arbitrator_account.bump
     )]
     pub arbitrator_account: Account<'info, Arbitrator>,
-    /// Anyone can call to update arbitrator stats
+    /// AccuracyClaim PDA - prevents duplicate accuracy claims (C-1 fix)
+    #[account(
+        init,
+        payer = caller,
+        space = 8 + AccuracyClaim::INIT_SPACE,
+        seeds = [b"accuracy_claim", dispute_case.key().as_ref(), arbitrator_account.agent.as_ref()],
+        bump
+    )]
+    pub accuracy_claim: Account<'info, AccuracyClaim>,
+    /// Caller pays for AccuracyClaim PDA rent
+    #[account(mut)]
     pub caller: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct ClaimExpiredArbitration<'info> {
+    #[account(
+        mut,
+        constraint = escrow.poster == poster.key() @ EscrowError::PosterMismatch
+    )]
+    pub escrow: Account<'info, Escrow>,
+    #[account(mut)]
+    pub poster: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct RemoveArbitrator<'info> {
+    #[account(
+        mut,
+        seeds = [b"arbitrator_pool"],
+        bump = pool.bump
+    )]
+    pub pool: Account<'info, ArbitratorPool>,
+    #[account(
+        mut,
+        seeds = [b"arbitrator", arbitrator_account.agent.as_ref()],
+        bump = arbitrator_account.bump
+    )]
+    pub arbitrator_account: Account<'info, Arbitrator>,
+    /// The arbitrator's wallet - receives stake back
+    /// CHECK: Verified by arbitrator_account.agent constraint
+    #[account(
+        mut,
+        constraint = arbitrator_agent.key() == arbitrator_account.agent @ EscrowError::Unauthorized
+    )]
+    pub arbitrator_agent: AccountInfo<'info>,
+    /// Platform authority - only they can remove arbitrators
+    #[account(
+        constraint = authority.key() == PLATFORM_WALLET @ EscrowError::NotPlatformAuthority
+    )]
+    pub authority: Signer<'info>,
 }
 
 #[derive(Accounts)]
@@ -1348,6 +1498,16 @@ pub struct DisputeCase {
     pub voting_deadline: i64,
     pub resolution: Option<DisputeResolution>,
     pub created_at: i64,
+    pub bump: u8,
+}
+
+/// Tracks accuracy claims to prevent duplicate calls (C-1 fix)
+#[account]
+#[derive(InitSpace)]
+pub struct AccuracyClaim {
+    pub dispute_case: Pubkey,
+    pub arbitrator: Pubkey,
+    pub claimed_at: i64,
     pub bump: u8,
 }
 
@@ -1548,6 +1708,20 @@ pub struct ArbitratorAccountClosed {
     pub rent_returned: u64,
 }
 
+#[event]
+pub struct ExpiredArbitrationClaimed {
+    pub job_id: String,
+    pub poster: Pubkey,
+    pub amount: u64,
+}
+
+#[event]
+pub struct ArbitratorRemoved {
+    pub agent: Pubkey,
+    pub removed_by: Pubkey,
+    pub stake_returned: u64,
+}
+
 // ============== ERRORS ==============
 
 #[error_code]
@@ -1627,4 +1801,10 @@ pub enum EscrowError {
     ArbitratorStillActive,
     #[msg("Arbitrator is still in the pool")]
     ArbitratorStillInPool,
+    #[msg("Amount too low (minimum 0.01 SOL)")]
+    AmountTooLow,
+    #[msg("Escrow is not in arbitration")]
+    NotInArbitration,
+    #[msg("Arbitration grace period has not passed (48h after expiry)")]
+    ArbitrationGracePeriodNotPassed,
 }

@@ -231,6 +231,170 @@
       "args": []
     },
     {
+      "name": "claim_expired_arbitration",
+      "docs": [
+        "Emergency release for expired arbitrations (H-2 fix)",
+        "If arbitration extends past escrow expiry + grace period, poster can reclaim funds"
+      ],
+      "discriminator": [
+        29,
+        67,
+        97,
+        144,
+        142,
+        189,
+        237,
+        229
+      ],
+      "accounts": [
+        {
+          "name": "escrow",
+          "writable": true
+        },
+        {
+          "name": "poster",
+          "writable": true,
+          "signer": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "close_arbitrator_account",
+      "docs": [
+        "Close an inactive arbitrator account - returns rent to agent"
+      ],
+      "discriminator": [
+        228,
+        66,
+        73,
+        97,
+        165,
+        7,
+        15,
+        15
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  114,
+                  98,
+                  105,
+                  116,
+                  114,
+                  97,
+                  116,
+                  111,
+                  114,
+                  95,
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "arbitrator_account",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  114,
+                  98,
+                  105,
+                  116,
+                  114,
+                  97,
+                  116,
+                  111,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "agent"
+              }
+            ]
+          }
+        },
+        {
+          "name": "agent",
+          "docs": [
+            "Rent returned to the arbitrator agent"
+          ],
+          "writable": true,
+          "signer": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "close_dispute_case",
+      "docs": [
+        "Close a dispute case after execution - returns rent to initiator"
+      ],
+      "discriminator": [
+        11,
+        252,
+        243,
+        129,
+        151,
+        164,
+        230,
+        49
+      ],
+      "accounts": [
+        {
+          "name": "dispute_case",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  105,
+                  115,
+                  112,
+                  117,
+                  116,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "escrow"
+              }
+            ]
+          }
+        },
+        {
+          "name": "escrow"
+        },
+        {
+          "name": "initiator",
+          "docs": [
+            "Rent returned to the original dispute initiator"
+          ],
+          "writable": true,
+          "signer": true
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "close_escrow",
       "docs": [
         "Close escrow account and reclaim rent"
@@ -346,7 +510,8 @@
     {
       "name": "execute_dispute_resolution",
       "docs": [
-        "Execute dispute resolution - transfer funds based on outcome"
+        "Execute dispute resolution - transfer funds based on outcome",
+        "Also updates reputation for winner/loser"
       ],
       "discriminator": [
         106,
@@ -378,6 +543,62 @@
           "name": "platform",
           "writable": true,
           "address": "BpH7T5tijFRSyPhMn62WcgGFjHEUMJ8WXQfJ2GAfB893"
+        },
+        {
+          "name": "worker_reputation",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  112,
+                  117,
+                  116,
+                  97,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "escrow.worker",
+                "account": "Escrow"
+              }
+            ]
+          }
+        },
+        {
+          "name": "poster_reputation",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  112,
+                  117,
+                  116,
+                  97,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "escrow.poster",
+                "account": "Escrow"
+              }
+            ]
+          }
         },
         {
           "name": "executor",
@@ -901,6 +1122,96 @@
       "args": []
     },
     {
+      "name": "remove_arbitrator",
+      "docs": [
+        "Remove an arbitrator from the pool (platform authority only)",
+        "Returns their stake - use for bad actors"
+      ],
+      "discriminator": [
+        177,
+        100,
+        82,
+        152,
+        42,
+        54,
+        58,
+        95
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  114,
+                  98,
+                  105,
+                  116,
+                  114,
+                  97,
+                  116,
+                  111,
+                  114,
+                  95,
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "arbitrator_account",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  114,
+                  98,
+                  105,
+                  116,
+                  114,
+                  97,
+                  116,
+                  111,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "arbitrator_account.agent",
+                "account": "Arbitrator"
+              }
+            ]
+          }
+        },
+        {
+          "name": "arbitrator_agent",
+          "docs": [
+            "The arbitrator's wallet - receives stake back"
+          ],
+          "writable": true
+        },
+        {
+          "name": "authority",
+          "docs": [
+            "Platform authority - only they can remove arbitrators"
+          ],
+          "signer": true
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "submit_work",
       "docs": [
         "Worker submits completed work - starts 24h review window"
@@ -1017,9 +1328,124 @@
         }
       ],
       "args": []
+    },
+    {
+      "name": "update_arbitrator_accuracy",
+      "docs": [
+        "Update arbitrator accuracy after dispute resolution (C-1 fix)",
+        "Creates AccuracyClaim PDA to prevent duplicate calls"
+      ],
+      "discriminator": [
+        28,
+        218,
+        124,
+        68,
+        39,
+        229,
+        87,
+        89
+      ],
+      "accounts": [
+        {
+          "name": "dispute_case"
+        },
+        {
+          "name": "arbitrator_account",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  114,
+                  98,
+                  105,
+                  116,
+                  114,
+                  97,
+                  116,
+                  111,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "arbitrator_account.agent",
+                "account": "Arbitrator"
+              }
+            ]
+          }
+        },
+        {
+          "name": "accuracy_claim",
+          "docs": [
+            "AccuracyClaim PDA - prevents duplicate accuracy claims (C-1 fix)"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  99,
+                  99,
+                  117,
+                  114,
+                  97,
+                  99,
+                  121,
+                  95,
+                  99,
+                  108,
+                  97,
+                  105,
+                  109
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "dispute_case"
+              },
+              {
+                "kind": "account",
+                "path": "arbitrator_account.agent",
+                "account": "Arbitrator"
+              }
+            ]
+          }
+        },
+        {
+          "name": "caller",
+          "docs": [
+            "Caller pays for AccuracyClaim PDA rent"
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
     }
   ],
   "accounts": [
+    {
+      "name": "AccuracyClaim",
+      "discriminator": [
+        230,
+        250,
+        64,
+        218,
+        235,
+        7,
+        222,
+        137
+      ]
+    },
     {
       "name": "AgentReputation",
       "discriminator": [
@@ -1101,6 +1527,32 @@
       ]
     },
     {
+      "name": "ArbitratorAccountClosed",
+      "discriminator": [
+        0,
+        196,
+        184,
+        30,
+        80,
+        239,
+        243,
+        116
+      ]
+    },
+    {
+      "name": "ArbitratorAccuracyUpdated",
+      "discriminator": [
+        67,
+        170,
+        91,
+        52,
+        79,
+        40,
+        135,
+        107
+      ]
+    },
+    {
       "name": "ArbitratorPoolInitialized",
       "discriminator": [
         163,
@@ -1127,6 +1579,19 @@
       ]
     },
     {
+      "name": "ArbitratorRemoved",
+      "discriminator": [
+        95,
+        191,
+        171,
+        10,
+        172,
+        249,
+        200,
+        162
+      ]
+    },
+    {
       "name": "ArbitratorUnregistered",
       "discriminator": [
         120,
@@ -1137,6 +1602,19 @@
         66,
         104,
         133
+      ]
+    },
+    {
+      "name": "DisputeCaseClosed",
+      "discriminator": [
+        168,
+        29,
+        43,
+        124,
+        11,
+        13,
+        191,
+        114
       ]
     },
     {
@@ -1241,6 +1719,19 @@
         218,
         58,
         112
+      ]
+    },
+    {
+      "name": "ExpiredArbitrationClaimed",
+      "discriminator": [
+        110,
+        67,
+        103,
+        2,
+        115,
+        29,
+        64,
+        118
       ]
     },
     {
@@ -1513,9 +2004,71 @@
       "code": 6032,
       "name": "HashMismatch",
       "msg": "Job ID hash does not match provided job ID"
+    },
+    {
+      "code": 6033,
+      "name": "ArbitratorDidNotVote",
+      "msg": "Arbitrator did not vote on this dispute"
+    },
+    {
+      "code": 6034,
+      "name": "DisputeNotExecuted",
+      "msg": "Dispute has not been executed yet"
+    },
+    {
+      "code": 6035,
+      "name": "ArbitratorStillActive",
+      "msg": "Arbitrator is still active - unregister first"
+    },
+    {
+      "code": 6036,
+      "name": "ArbitratorStillInPool",
+      "msg": "Arbitrator is still in the pool"
+    },
+    {
+      "code": 6037,
+      "name": "AmountTooLow",
+      "msg": "Amount too low (minimum 0.01 SOL)"
+    },
+    {
+      "code": 6038,
+      "name": "NotInArbitration",
+      "msg": "Escrow is not in arbitration"
+    },
+    {
+      "code": 6039,
+      "name": "ArbitrationGracePeriodNotPassed",
+      "msg": "Arbitration grace period has not passed (48h after expiry)"
     }
   ],
   "types": [
+    {
+      "name": "AccuracyClaim",
+      "docs": [
+        "Tracks accuracy claims to prevent duplicate calls (C-1 fix)"
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "dispute_case",
+            "type": "pubkey"
+          },
+          {
+            "name": "arbitrator",
+            "type": "pubkey"
+          },
+          {
+            "name": "claimed_at",
+            "type": "i64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
     {
       "name": "AgentReputation",
       "type": {
@@ -1625,6 +2178,50 @@
       }
     },
     {
+      "name": "ArbitratorAccountClosed",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "agent",
+            "type": "pubkey"
+          },
+          {
+            "name": "rent_returned",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ArbitratorAccuracyUpdated",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "arbitrator",
+            "type": "pubkey"
+          },
+          {
+            "name": "dispute_case",
+            "type": "pubkey"
+          },
+          {
+            "name": "voted_correctly",
+            "type": "bool"
+          },
+          {
+            "name": "cases_correct",
+            "type": "u64"
+          },
+          {
+            "name": "cases_voted",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
       "name": "ArbitratorPool",
       "type": {
         "kind": "struct",
@@ -1673,6 +2270,26 @@
           },
           {
             "name": "stake",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ArbitratorRemoved",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "agent",
+            "type": "pubkey"
+          },
+          {
+            "name": "removed_by",
+            "type": "pubkey"
+          },
+          {
+            "name": "stake_returned",
             "type": "u64"
           }
         ]
@@ -1756,6 +2373,26 @@
           {
             "name": "bump",
             "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "DisputeCaseClosed",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "dispute_case",
+            "type": "pubkey"
+          },
+          {
+            "name": "escrow",
+            "type": "pubkey"
+          },
+          {
+            "name": "rent_returned_to",
+            "type": "pubkey"
           }
         ]
       }
@@ -1874,6 +2511,14 @@
           {
             "name": "amount",
             "type": "u64"
+          },
+          {
+            "name": "worker_new_score",
+            "type": "i64"
+          },
+          {
+            "name": "poster_new_score",
+            "type": "i64"
           }
         ]
       }
@@ -2064,6 +2709,26 @@
           },
           {
             "name": "DisputeSplit"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ExpiredArbitrationClaimed",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "job_id",
+            "type": "string"
+          },
+          {
+            "name": "poster",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
           }
         ]
       }

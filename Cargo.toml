@@ -3,6 +3,12 @@ members = ["programs/*"]
 resolver = "2"
 
 [profile.release]
-overflow-checks = true
-lto = "fat"
-codegen-units = 1
+opt-level = "z"          # Optimize for size
+overflow-checks = true   # Keep for safety in financial code
+lto = "fat"              # Link-time optimization for smaller binary
+codegen-units = 1        # Single codegen unit for better optimization
+strip = true             # Strip symbols
+panic = "abort"          # Smaller panic handling (no unwinding code)
+incremental = false      # Better optimization (no incremental artifacts)
+debug = false            # No debug info
+debug-assertions = false # No debug assertions in release
