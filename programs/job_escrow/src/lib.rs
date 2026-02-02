@@ -43,14 +43,10 @@ pub const PLATFORM_WALLET: Pubkey = [
     0x2d, 0x5c, 0x8b, 0x1a, 0x3f, 0x6e, 0x9d, 0x4c,
 ];
 
-#[cfg(all(feature = "bpf-entrypoint", target_os = "solana"))]
+// Entrypoint and allocator for BPF builds
 pinocchio::program_entrypoint!(process_instruction);
-
-#[cfg(all(feature = "bpf-entrypoint", target_os = "solana"))]
 pinocchio::default_allocator!();
-
-#[cfg(all(feature = "bpf-entrypoint", target_os = "solana"))]
-pinocchio::default_panic_handler!();
+pinocchio::nostd_panic_handler!();
 
 /// Main program entrypoint
 pub fn process_instruction(
