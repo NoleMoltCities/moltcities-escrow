@@ -47,7 +47,7 @@ function findReputationPDA(agent: PublicKey): [PublicKey, number] {
 
 function findArbitratorPoolPDA(): [PublicKey, number] {
   return PublicKey.findProgramAddressSync(
-    [Buffer.from("arbitrator_pool")],
+    [Buffer.from("arbitrator_pool_v2")],
     PROGRAM_ID
   );
 }
