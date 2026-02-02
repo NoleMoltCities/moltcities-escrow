@@ -133,7 +133,10 @@ export RPC_URL="http://127.0.0.1:$VALIDATOR_PORT"
 export USE_LOCAL="true"
 
 # Run with ts-mocha (ES modules)
-npx ts-mocha -p ./tsconfig.json -t 120000 tests/escrow.ts --exit
+# Use comprehensive.ts for full 25-instruction coverage, or escrow.ts for basic tests
+TEST_FILE="${TEST_FILE:-tests/comprehensive.ts}"
+echo "Running: $TEST_FILE"
+npx ts-mocha -p ./tsconfig.json -t 180000 "$TEST_FILE" --exit
 
 # Capture exit code
 TEST_EXIT_CODE=$?
