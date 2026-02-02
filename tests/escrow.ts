@@ -19,6 +19,11 @@ import { createHash } from "crypto";
 import { expect } from "chai";
 import * as fs from "fs";
 import * as path from "path";
+import { fileURLToPath } from "url";
+
+// ES module __dirname equivalent
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Program ID
 const PROGRAM_ID = new PublicKey("27YquD9ZJvjLfELseqgawEMZq1mD1betBQZz5RgehNZr");
@@ -484,37 +489,62 @@ describe("job_escrow (Pinocchio)", () => {
       }
     }
     
-    // Create test wallets
-    poster = Keypair.generate();
-    worker = Keypair.generate();
+    // Create test wallets - load pre-funded on devnet if available
+    const posterKeyPath = path.join(__dirname, "..", "test-poster.json");
+    const workerKeyPath = path.join(__dirname, "..", "test-worker.json");
+    
+    if (useDevnet && fs.existsSync(posterKeyPath) && fs.existsSync(workerKeyPath)) {
+      console.log("  Loading pre-funded wallets...");
+      poster = Keypair.fromSecretKey(
+        Uint8Array.from(JSON.parse(fs.readFileSync(posterKeyPath, "utf-8")))
+      );
+      worker = Keypair.fromSecretKey(
+        Uint8Array.from(JSON.parse(fs.readFileSync(workerKeyPath, "utf-8")))
+      );
+      console.log(`    ✓ Loaded poster: ${poster.publicKey.toBase58()}`);
+      console.log(`    ✓ Loaded worker: ${worker.publicKey.toBase58()}`);
+    } else {
+      poster = Keypair.generate();
+      worker = Keypair.generate();
+    }
+    
     arbitrator1 = Keypair.generate();
     arbitrator2 = Keypair.generate();
     arbitrator3 = Keypair.generate();
     arbitrator4 = Keypair.generate();
     arbitrator5 = Keypair.generate();
 
-    // Fund wallets
-    console.log("  Funding test wallets...");
-    const airdropAmount = useDevnet ? 0.5 * LAMPORTS_PER_SOL : 2 * LAMPORTS_PER_SOL;
+    // Fund wallets (skip if pre-funded devnet wallets)
+    const posterBalance = await connection.getBalance(poster.publicKey);
+    const workerBalance = await connection.getBalance(worker.publicKey);
     
-    for (const wallet of [poster, worker]) {
-      let retries = 3;
-      while (retries > 0) {
-        try {
-          const sig = await connection.requestAirdrop(
-            wallet.publicKey,
-            airdropAmount
-          );
-          await connection.confirmTransaction(sig, "confirmed");
-          console.log(`    ✓ Funded ${wallet.publicKey.toBase58().slice(0, 8)}...`);
-          break;
-        } catch (e: any) {
-          retries--;
-          if (retries > 0) {
-            console.log(`    Airdrop failed, retrying... (${retries} left)`);
-            await new Promise(resolve => setTimeout(resolve, 2000));
-          } else {
-            console.log(`    ⚠️ Airdrop failed for ${wallet.publicKey.toBase58().slice(0, 8)}...`);
+    if (posterBalance > 0.1 * LAMPORTS_PER_SOL && workerBalance > 0.1 * LAMPORTS_PER_SOL) {
+      console.log(`  Wallets already funded:`);
+      console.log(`    Poster: ${posterBalance / LAMPORTS_PER_SOL} SOL`);
+      console.log(`    Worker: ${workerBalance / LAMPORTS_PER_SOL} SOL`);
+    } else {
+      console.log("  Funding test wallets...");
+      const airdropAmount = useDevnet ? 0.5 * LAMPORTS_PER_SOL : 2 * LAMPORTS_PER_SOL;
+      
+      for (const wallet of [poster, worker]) {
+        let retries = 3;
+        while (retries > 0) {
+          try {
+            const sig = await connection.requestAirdrop(
+              wallet.publicKey,
+              airdropAmount
+            );
+            await connection.confirmTransaction(sig, "confirmed");
+            console.log(`    ✓ Funded ${wallet.publicKey.toBase58().slice(0, 8)}...`);
+            break;
+          } catch (e: any) {
+            retries--;
+            if (retries > 0) {
+              console.log(`    Airdrop failed, retrying... (${retries} left)`);
+              await new Promise(resolve => setTimeout(resolve, 2000));
+            } else {
+              console.log(`    ⚠️ Airdrop failed for ${wallet.publicKey.toBase58().slice(0, 8)}...`);
+            }
           }
         }
       }
@@ -523,13 +553,14 @@ describe("job_escrow (Pinocchio)", () => {
     // Wait for airdrops to settle
     await new Promise(resolve => setTimeout(resolve, 2000));
     
-    // Check balances
-    const posterBalance = await connection.getBalance(poster.publicKey);
-    const workerBalance = await connection.getBalance(worker.publicKey);
-    console.log(`  Poster balance: ${posterBalance / LAMPORTS_PER_SOL} SOL`);
-    console.log(`  Worker balance: ${workerBalance / LAMPORTS_PER_SOL} SOL`);
+    // Final balance check
+    const finalPosterBalance = await connection.getBalance(poster.publicKey);
+    const finalWorkerBalance = await connection.getBalance(worker.publicKey);
+    console.log(`  Final balances:`);
+    console.log(`    Poster: ${finalPosterBalance / LAMPORTS_PER_SOL} SOL`);
+    console.log(`    Worker: ${finalWorkerBalance / LAMPORTS_PER_SOL} SOL`);
     
-    if (posterBalance < 0.1 * LAMPORTS_PER_SOL) {
+    if (finalPosterBalance < 0.1 * LAMPORTS_PER_SOL) {
       console.log("  ⚠️ Insufficient funds for tests. Skipping...");
       this.skip();
     }

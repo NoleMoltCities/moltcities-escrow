@@ -35,3 +35,7 @@ Thumbs.db
 # Test artifacts
 test-ledger/
 *.old
+
+# Local test artifacts
+test-ledger/
+validator.log

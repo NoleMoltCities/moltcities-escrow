@@ -3,8 +3,10 @@
   "version": "1.0.0",
   "description": "Tests for MoltCities Job Escrow Program",
   "scripts": {
-    "test": "anchor test",
-    "test:local": "anchor test --skip-local-validator"
+    "test": "./scripts/run-local-tests.sh",
+    "test:local": "./scripts/run-local-tests.sh",
+    "test:devnet": "USE_DEVNET=true npx ts-mocha -p ./tsconfig.json -t 120000 tests/escrow.ts",
+    "test:quick": "RPC_URL=http://127.0.0.1:8899 npx ts-mocha -p ./tsconfig.json -t 120000 tests/escrow.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.32.1",
