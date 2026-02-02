@@ -85,12 +85,16 @@ impl AgentReputation {
 
     /// Calculate reputation score based on activity
     /// Formula: (jobs_completed * 10) + (disputes_won * 5) - (disputes_lost * 10)
+    /// SECURITY FIX H-05: Use saturating arithmetic to prevent overflow
     #[inline(always)]
     pub fn calculate_score(&self) -> i64 {
-        let base = (self.jobs_completed as i64) * 10;
-        let dispute_bonus = (self.disputes_won as i64) * 5;
-        let dispute_penalty = (self.disputes_lost as i64) * 10;
-        base + dispute_bonus - dispute_penalty
+        // Use saturating_mul to prevent overflow
+        let base = (self.jobs_completed as i64).saturating_mul(10);
+        let dispute_bonus = (self.disputes_won as i64).saturating_mul(5);
+        let dispute_penalty = (self.disputes_lost as i64).saturating_mul(10);
+        
+        // Use saturating arithmetic for the final calculation
+        base.saturating_add(dispute_bonus).saturating_sub(dispute_penalty)
     }
 
     /// Update the reputation score field

@@ -5,16 +5,17 @@
 use pinocchio::{
     account_info::AccountInfo,
     program_error::ProgramError,
-    pubkey::Pubkey,
+    pubkey::{find_program_address, Pubkey},
     sysvars::{clock::Clock, Sysvar},
     ProgramResult,
 };
 
 use crate::{
     errors::EscrowError,
-    state::{JobEscrow, EscrowStatus},
+    state::{JobEscrow, EscrowStatus, DisputeCase},
     require, require_some,
     PLATFORM_WALLET,
+    ID,
 };
 
 /// Minimum timelock for refunds after dispute: 24 hours
@@ -63,13 +64,26 @@ impl<'a> TryFrom<&'a [AccountInfo]> for InitiateDisputeAccounts<'a> {
 pub fn process_initiate_dispute(
     accounts: &[AccountInfo],
     _data: &[u8],
-    _program_id: &Pubkey,
+    program_id: &Pubkey,
 ) -> ProgramResult {
     let ctx = InitiateDisputeAccounts::try_from(accounts)?;
     let clock = Clock::get()?;
 
+    // SECURITY FIX C-01: Verify escrow account is owned by this program
+    if *ctx.escrow.owner() != ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
     let escrow_data = &mut ctx.escrow.try_borrow_mut_data()?;
     let escrow = JobEscrow::load_mut(escrow_data)?;
+
+    // SECURITY FIX C-02: Verify escrow PDA derivation
+    let (expected_pda, expected_bump) = find_program_address(
+        &[b"escrow", &escrow.job_id_hash, &escrow.poster],
+        program_id,
+    );
+    require!(ctx.escrow.key() == &expected_pda, EscrowError::InvalidPda);
+    require!(escrow.bump == expected_bump, EscrowError::InvalidPda);
 
     // Must be Active or PendingReview
     require!(
@@ -120,13 +134,26 @@ impl<'a> TryFrom<&'a [AccountInfo]> for RefundToPosterAccounts<'a> {
 pub fn process_refund_to_poster(
     accounts: &[AccountInfo],
     _data: &[u8],
-    _program_id: &Pubkey,
+    program_id: &Pubkey,
 ) -> ProgramResult {
     let ctx = RefundToPosterAccounts::try_from(accounts)?;
     let clock = Clock::get()?;
 
+    // SECURITY FIX C-01: Verify escrow account is owned by this program
+    if *ctx.escrow.owner() != ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
     let escrow_data = &mut ctx.escrow.try_borrow_mut_data()?;
     let escrow = JobEscrow::load_mut(escrow_data)?;
+
+    // SECURITY FIX C-02: Verify escrow PDA derivation
+    let (expected_pda, expected_bump) = find_program_address(
+        &[b"escrow", &escrow.job_id_hash, &escrow.poster],
+        program_id,
+    );
+    require!(ctx.escrow.key() == &expected_pda, EscrowError::InvalidPda);
+    require!(escrow.bump == expected_bump, EscrowError::InvalidPda);
 
     // Must be Disputed or Cancelled
     require!(
@@ -182,13 +209,26 @@ impl<'a> TryFrom<&'a [AccountInfo]> for ClaimExpiredAccounts<'a> {
 pub fn process_claim_expired(
     accounts: &[AccountInfo],
     _data: &[u8],
-    _program_id: &Pubkey,
+    program_id: &Pubkey,
 ) -> ProgramResult {
     let ctx = ClaimExpiredAccounts::try_from(accounts)?;
     let clock = Clock::get()?;
 
+    // SECURITY FIX C-01: Verify escrow account is owned by this program
+    if *ctx.escrow.owner() != ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
     let escrow_data = &mut ctx.escrow.try_borrow_mut_data()?;
     let escrow = JobEscrow::load_mut(escrow_data)?;
+
+    // SECURITY FIX C-02: Verify escrow PDA derivation
+    let (expected_pda, expected_bump) = find_program_address(
+        &[b"escrow", &escrow.job_id_hash, &escrow.poster],
+        program_id,
+    );
+    require!(ctx.escrow.key() == &expected_pda, EscrowError::InvalidPda);
+    require!(escrow.bump == expected_bump, EscrowError::InvalidPda);
 
     require!(escrow.status == EscrowStatus::Active as u8, EscrowError::EscrowNotActive);
     require!(ctx.poster.key() == &escrow.poster, EscrowError::PosterMismatch);
@@ -230,12 +270,25 @@ impl<'a> TryFrom<&'a [AccountInfo]> for CancelEscrowAccounts<'a> {
 pub fn process_cancel_escrow(
     accounts: &[AccountInfo],
     _data: &[u8],
-    _program_id: &Pubkey,
+    program_id: &Pubkey,
 ) -> ProgramResult {
     let ctx = CancelEscrowAccounts::try_from(accounts)?;
 
+    // SECURITY FIX C-01: Verify escrow account is owned by this program
+    if *ctx.escrow.owner() != ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
     let escrow_data = &mut ctx.escrow.try_borrow_mut_data()?;
     let escrow = JobEscrow::load_mut(escrow_data)?;
+
+    // SECURITY FIX C-02: Verify escrow PDA derivation
+    let (expected_pda, expected_bump) = find_program_address(
+        &[b"escrow", &escrow.job_id_hash, &escrow.poster],
+        program_id,
+    );
+    require!(ctx.escrow.key() == &expected_pda, EscrowError::InvalidPda);
+    require!(escrow.bump == expected_bump, EscrowError::InvalidPda);
 
     require!(escrow.status == EscrowStatus::Active as u8, EscrowError::EscrowNotActive);
     require!(ctx.poster.key() == &escrow.poster, EscrowError::PosterMismatch);
@@ -252,8 +305,10 @@ pub fn process_cancel_escrow(
 // ============== CLAIM EXPIRED ARBITRATION ==============
 
 /// Claim expired arbitration accounts
+/// SECURITY FIX H-02: Now requires dispute_case account to read voting_deadline
 pub struct ClaimExpiredArbitrationAccounts<'a> {
     pub escrow: &'a AccountInfo,
+    pub dispute_case: &'a AccountInfo,
     pub poster: &'a AccountInfo,
 }
 
@@ -261,7 +316,7 @@ impl<'a> TryFrom<&'a [AccountInfo]> for ClaimExpiredArbitrationAccounts<'a> {
     type Error = ProgramError;
 
     fn try_from(accounts: &'a [AccountInfo]) -> Result<Self, Self::Error> {
-        let [escrow, poster, ..] = accounts else {
+        let [escrow, dispute_case, poster, ..] = accounts else {
             return Err(ProgramError::NotEnoughAccountKeys);
         };
 
@@ -269,7 +324,7 @@ impl<'a> TryFrom<&'a [AccountInfo]> for ClaimExpiredArbitrationAccounts<'a> {
             return Err(ProgramError::MissingRequiredSignature);
         }
 
-        Ok(Self { escrow, poster })
+        Ok(Self { escrow, dispute_case, poster })
     }
 }
 
@@ -277,23 +332,55 @@ impl<'a> TryFrom<&'a [AccountInfo]> for ClaimExpiredArbitrationAccounts<'a> {
 pub fn process_claim_expired_arbitration(
     accounts: &[AccountInfo],
     _data: &[u8],
-    _program_id: &Pubkey,
+    program_id: &Pubkey,
 ) -> ProgramResult {
     let ctx = ClaimExpiredArbitrationAccounts::try_from(accounts)?;
     let clock = Clock::get()?;
 
+    // SECURITY FIX C-01: Verify escrow account is owned by this program
+    if *ctx.escrow.owner() != ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
+    // SECURITY FIX C-01: Verify dispute_case account is owned by this program
+    if *ctx.dispute_case.owner() != ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
     let escrow_data = &mut ctx.escrow.try_borrow_mut_data()?;
     let escrow = JobEscrow::load_mut(escrow_data)?;
+
+    // SECURITY FIX C-02: Verify escrow PDA derivation
+    let (expected_escrow_pda, expected_escrow_bump) = find_program_address(
+        &[b"escrow", &escrow.job_id_hash, &escrow.poster],
+        program_id,
+    );
+    require!(ctx.escrow.key() == &expected_escrow_pda, EscrowError::InvalidPda);
+    require!(escrow.bump == expected_escrow_bump, EscrowError::InvalidPda);
+
+    // SECURITY FIX C-02: Verify dispute_case PDA derivation
+    let (expected_dispute_pda, _) = find_program_address(
+        &[b"dispute", ctx.escrow.key()],
+        program_id,
+    );
+    require!(ctx.dispute_case.key() == &expected_dispute_pda, EscrowError::InvalidPda);
 
     require!(escrow.status == EscrowStatus::InArbitration as u8, EscrowError::NotInArbitration);
     require!(ctx.poster.key() == &escrow.poster, EscrowError::PosterMismatch);
 
-    // Must be past expiry + grace period
-    let emergency_deadline = escrow.expires_at + ARBITRATION_GRACE_PERIOD;
+    // SECURITY FIX H-02: Use dispute.voting_deadline instead of escrow.expires_at
+    // Load dispute case to get the voting_deadline
+    let dispute_data = ctx.dispute_case.try_borrow_data()?;
+    let dispute = DisputeCase::load(&dispute_data)?;
+
+    // Must be past voting_deadline + grace period
+    let emergency_deadline = dispute.voting_deadline.saturating_add(ARBITRATION_GRACE_PERIOD);
     require!(
         clock.unix_timestamp >= emergency_deadline,
         EscrowError::ArbitrationGracePeriodNotPassed
     );
+
+    drop(dispute_data);
 
     let amount = escrow.amount;
     escrow.status = EscrowStatus::Refunded as u8;

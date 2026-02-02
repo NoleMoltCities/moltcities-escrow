@@ -5,7 +5,7 @@
 use pinocchio::{
     account_info::AccountInfo,
     program_error::ProgramError,
-    pubkey::Pubkey,
+    pubkey::{find_program_address, Pubkey},
     sysvars::{clock::Clock, Sysvar},
     ProgramResult,
 };
@@ -14,6 +14,7 @@ use crate::{
     errors::EscrowError,
     state::{JobEscrow, EscrowStatus},
     require,
+    ID,
 };
 
 /// Review window after worker submits: 24 hours
@@ -71,16 +72,29 @@ impl SubmitWorkData {
 pub fn process_submit_work(
     accounts: &[AccountInfo],
     data: &[u8],
-    _program_id: &Pubkey,
+    program_id: &Pubkey,
 ) -> ProgramResult {
     let ctx = SubmitWorkAccounts::try_from(accounts)?;
     let args = SubmitWorkData::try_from_slice(data)?;
 
     let clock = Clock::get()?;
 
+    // SECURITY FIX C-01: Verify escrow account is owned by this program
+    if *ctx.escrow.owner() != ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
     // Load and validate escrow
     let escrow_data = &mut ctx.escrow.try_borrow_mut_data()?;
     let escrow = JobEscrow::load_mut(escrow_data)?;
+
+    // SECURITY FIX C-02: Verify escrow PDA derivation
+    let (expected_pda, expected_bump) = find_program_address(
+        &[b"escrow", &escrow.job_id_hash, &escrow.poster],
+        program_id,
+    );
+    require!(ctx.escrow.key() == &expected_pda, EscrowError::InvalidPda);
+    require!(escrow.bump == expected_bump, EscrowError::InvalidPda);
 
     // Must be active
     require!(escrow.status == EscrowStatus::Active as u8, EscrowError::EscrowNotActive);

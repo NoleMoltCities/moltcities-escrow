@@ -22,6 +22,7 @@ use crate::{
     },
     require, require_some,
     PLATFORM_WALLET,
+    ID,
 };
 
 /// Arbitration voting window: 48 hours
@@ -137,6 +138,15 @@ pub fn process_register_arbitrator(
     let ctx = RegisterArbitratorAccounts::try_from(accounts)?;
     let clock = Clock::get()?;
 
+    // SECURITY FIX C-01: Verify pool account is owned by this program
+    if *ctx.pool.owner() != ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
+    // SECURITY FIX H-03: Verify pool PDA derivation
+    let (expected_pool_pda, _) = find_program_address(&[b"arbitrator_pool_v2"], program_id);
+    require!(ctx.pool.key() == &expected_pool_pda, EscrowError::InvalidPda);
+
     // Verify arbitrator PDA
     let (expected_pda, bump) = find_program_address(
         &[b"arbitrator", ctx.agent.key()],
@@ -153,7 +163,9 @@ pub fn process_register_arbitrator(
     // Create arbitrator account with stake
     let rent = Rent::get()?;
     let rent_lamports = rent.minimum_balance(ArbitratorEntry::SPACE);
-    let total_lamports = rent_lamports + MIN_ARBITRATOR_STAKE;
+    // SECURITY FIX H-05: Use checked arithmetic
+    let total_lamports = rent_lamports.checked_add(MIN_ARBITRATOR_STAKE)
+        .ok_or(EscrowError::ArithmeticOverflow)?;
 
     let bump_ref = &[bump];
     let signer_seeds = seeds!(b"arbitrator", ctx.agent.key(), bump_ref);
@@ -210,9 +222,30 @@ impl<'a> TryFrom<&'a [AccountInfo]> for UnregisterArbitratorAccounts<'a> {
 pub fn process_unregister_arbitrator(
     accounts: &[AccountInfo],
     _data: &[u8],
-    _program_id: &Pubkey,
+    program_id: &Pubkey,
 ) -> ProgramResult {
     let ctx = UnregisterArbitratorAccounts::try_from(accounts)?;
+
+    // SECURITY FIX C-01: Verify pool account is owned by this program
+    if *ctx.pool.owner() != ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
+    // SECURITY FIX C-01: Verify arbitrator_account is owned by this program
+    if *ctx.arbitrator_account.owner() != ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
+    // SECURITY FIX H-03: Verify pool PDA derivation
+    let (expected_pool_pda, _) = find_program_address(&[b"arbitrator_pool_v2"], program_id);
+    require!(ctx.pool.key() == &expected_pool_pda, EscrowError::InvalidPda);
+
+    // SECURITY FIX C-02: Verify arbitrator PDA derivation
+    let (expected_arb_pda, expected_arb_bump) = find_program_address(
+        &[b"arbitrator", ctx.agent.key()],
+        program_id,
+    );
+    require!(ctx.arbitrator_account.key() == &expected_arb_pda, EscrowError::InvalidPda);
 
     // Load pool and remove
     let pool_data = &mut ctx.pool.try_borrow_mut_data()?;
@@ -223,13 +256,22 @@ pub fn process_unregister_arbitrator(
     let arb_data = &mut ctx.arbitrator_account.try_borrow_mut_data()?;
     let arb = ArbitratorEntry::load_mut(arb_data)?;
 
+    require!(arb.bump == expected_arb_bump, EscrowError::InvalidPda);
     require!(arb.is_active(), EscrowError::ArbitratorNotActive);
     require!(&arb.agent == ctx.agent.key(), EscrowError::Unauthorized);
 
     arb.is_active = 0;
 
-    // Return stake
-    transfer_lamports(ctx.arbitrator_account, ctx.agent, arb.stake)?;
+    // SECURITY FIX H-04: Verify account has enough balance and use safe transfer
+    let account_balance = *ctx.arbitrator_account.try_borrow_lamports()?;
+    let rent = Rent::get()?.minimum_balance(ArbitratorEntry::SPACE);
+    let available = account_balance.saturating_sub(rent);
+    
+    // Only return what's available, up to stake
+    let return_amount = core::cmp::min(arb.stake, available);
+    if return_amount > 0 {
+        transfer_lamports(ctx.arbitrator_account, ctx.agent, return_amount)?;
+    }
 
     Ok(())
 }
@@ -240,6 +282,7 @@ pub struct RaiseDisputeCaseAccounts<'a> {
     pub escrow: &'a AccountInfo,
     pub dispute_case: &'a AccountInfo,
     pub pool: &'a AccountInfo,
+    pub recent_slothashes: &'a AccountInfo,
     pub initiator: &'a AccountInfo,
     pub system_program: &'a AccountInfo,
 }
@@ -248,7 +291,8 @@ impl<'a> TryFrom<&'a [AccountInfo]> for RaiseDisputeCaseAccounts<'a> {
     type Error = ProgramError;
 
     fn try_from(accounts: &'a [AccountInfo]) -> Result<Self, Self::Error> {
-        let [escrow, dispute_case, pool, initiator, system_program, ..] = accounts else {
+        // SECURITY FIX H-01: Now requires recent_slothashes account for better entropy
+        let [escrow, dispute_case, pool, recent_slothashes, initiator, system_program, ..] = accounts else {
             return Err(ProgramError::NotEnoughAccountKeys);
         };
 
@@ -256,7 +300,7 @@ impl<'a> TryFrom<&'a [AccountInfo]> for RaiseDisputeCaseAccounts<'a> {
             return Err(ProgramError::MissingRequiredSignature);
         }
 
-        Ok(Self { escrow, dispute_case, pool, initiator, system_program })
+        Ok(Self { escrow, dispute_case, pool, recent_slothashes, initiator, system_program })
     }
 }
 
@@ -280,6 +324,14 @@ impl<'a> RaiseDisputeCaseData<'a> {
     }
 }
 
+/// SlotHashes sysvar ID
+const SLOT_HASHES_ID: Pubkey = [
+    0x06, 0xa7, 0xd5, 0x17, 0x18, 0x7b, 0xd1, 0x60,
+    0x35, 0xfa, 0xd3, 0x36, 0x80, 0x2e, 0x96, 0x71,
+    0x30, 0x77, 0x7b, 0xcb, 0x3a, 0xba, 0x4e, 0x40,
+    0x89, 0x07, 0x41, 0x51, 0x70, 0x4f, 0x9f, 0x14,
+];
+
 pub fn process_raise_dispute_case(
     accounts: &[AccountInfo],
     data: &[u8],
@@ -291,9 +343,34 @@ pub fn process_raise_dispute_case(
 
     require!(args.reason.len() <= DisputeCase::MAX_REASON_LEN, EscrowError::ReasonTooLong);
 
+    // SECURITY FIX C-01: Verify escrow account is owned by this program
+    if *ctx.escrow.owner() != ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
+    // SECURITY FIX C-01: Verify pool account is owned by this program
+    if *ctx.pool.owner() != ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
+    // SECURITY FIX H-01: Verify recent_slothashes is the correct sysvar
+    require!(ctx.recent_slothashes.key() == &SLOT_HASHES_ID, EscrowError::InvalidPda);
+
     // Load escrow
     let escrow_data = &mut ctx.escrow.try_borrow_mut_data()?;
     let escrow = JobEscrow::load_mut(escrow_data)?;
+
+    // SECURITY FIX C-02: Verify escrow PDA derivation
+    let (expected_escrow_pda, expected_escrow_bump) = find_program_address(
+        &[b"escrow", &escrow.job_id_hash, &escrow.poster],
+        program_id,
+    );
+    require!(ctx.escrow.key() == &expected_escrow_pda, EscrowError::InvalidPda);
+    require!(escrow.bump == expected_escrow_bump, EscrowError::InvalidPda);
+
+    // SECURITY FIX H-03: Verify pool PDA derivation
+    let (expected_pool_pda, _) = find_program_address(&[b"arbitrator_pool_v2"], program_id);
+    require!(ctx.pool.key() == &expected_pool_pda, EscrowError::InvalidPda);
 
     require!(
         escrow.status == EscrowStatus::Active as u8 || escrow.status == EscrowStatus::PendingReview as u8,
@@ -319,21 +396,40 @@ pub fn process_raise_dispute_case(
     );
     require!(ctx.dispute_case.key() == &expected_pda, EscrowError::InvalidPda);
 
-    // Select 5 random arbitrators using improved randomness
+    // SECURITY FIX H-01: Improved entropy using SlotHashes sysvar
+    // Read the first slot hash (most recent) from the SlotHashes sysvar
+    // The SlotHashes account format: [length: u64][SlotHash entries...]
+    // Each SlotHash entry: [slot: u64][hash: [u8; 32]]
+    let slothash_data = ctx.recent_slothashes.try_borrow_data()?;
+    let mut recent_hash = [0u8; 32];
+    if slothash_data.len() >= 48 {
+        // Skip 8-byte length, skip 8-byte slot, copy 32-byte hash
+        recent_hash.copy_from_slice(&slothash_data[16..48]);
+    }
+    drop(slothash_data);
+
+    // Combine multiple entropy sources including recent blockhash
     let escrow_key = ctx.escrow.key();
     let initiator_bytes = ctx.initiator.key();
     let slot_bytes = clock.slot.to_le_bytes();
     let ts_bytes = clock.unix_timestamp.to_le_bytes();
     let amt_bytes = escrow.amount.to_le_bytes();
 
-    // Combine entropy sources
+    // Build seed using XOR mixing with slot hash
     let mut seed_data = [0u8; 32];
-    for i in 0..8 { seed_data[i] = escrow_key[i] ^ initiator_bytes[i]; }
-    for i in 0..8 { seed_data[8 + i] = slot_bytes[i] ^ escrow_key[16 + i]; }
-    for i in 0..8 { seed_data[16 + i] = ts_bytes[i] ^ initiator_bytes[16 + i]; }
-    for i in 0..8 { seed_data[24 + i] = amt_bytes[i] ^ escrow_key[24 + i]; }
+    for i in 0..8 { 
+        seed_data[i] = escrow_key[i] ^ initiator_bytes[i] ^ recent_hash[i]; 
+    }
+    for i in 0..8 { 
+        seed_data[8 + i] = slot_bytes[i] ^ escrow_key[16 + i] ^ recent_hash[8 + i]; 
+    }
+    for i in 0..8 { 
+        seed_data[16 + i] = ts_bytes[i] ^ initiator_bytes[16 + i] ^ recent_hash[16 + i]; 
+    }
+    for i in 0..8 { 
+        seed_data[24 + i] = amt_bytes[i] ^ escrow_key[24 + i] ^ recent_hash[24 + i]; 
+    }
 
-    // Simple hash-like mixing
     let seed = u64::from_le_bytes(seed_data[0..8].try_into().unwrap());
 
     let mut selected: [Pubkey; ARBITRATORS_PER_DISPUTE] = [[0u8; 32]; ARBITRATORS_PER_DISPUTE];
@@ -435,7 +531,7 @@ impl CastArbitrationVoteData {
 pub fn process_cast_arbitration_vote(
     accounts: &[AccountInfo],
     data: &[u8],
-    _program_id: &Pubkey,
+    program_id: &Pubkey,
 ) -> ProgramResult {
     let ctx = CastArbitrationVoteAccounts::try_from(accounts)?;
     let args = CastArbitrationVoteData::try_from_slice(data)?;
@@ -444,16 +540,42 @@ pub fn process_cast_arbitration_vote(
     // Validate vote is ForWorker or ForPoster (not None)
     require!(args.vote != Vote::None, EscrowError::AlreadyVoted);
 
+    // SECURITY FIX C-01: Verify dispute_case account is owned by this program
+    if *ctx.dispute_case.owner() != ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
+    // SECURITY FIX C-01: Verify arbitrator_account is owned by this program
+    if *ctx.arbitrator_account.owner() != ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
+    // SECURITY FIX C-02: Verify arbitrator PDA derivation
+    let (expected_arb_pda, expected_arb_bump) = find_program_address(
+        &[b"arbitrator", ctx.voter.key()],
+        program_id,
+    );
+    require!(ctx.arbitrator_account.key() == &expected_arb_pda, EscrowError::InvalidPda);
+
     // Load arbitrator
     let arb_data = &mut ctx.arbitrator_account.try_borrow_mut_data()?;
     let arb = ArbitratorEntry::load_mut(arb_data)?;
 
+    require!(arb.bump == expected_arb_bump, EscrowError::InvalidPda);
     require!(arb.is_active(), EscrowError::ArbitratorNotActive);
     require!(&arb.agent == ctx.voter.key(), EscrowError::Unauthorized);
 
     // Load dispute case
     let dispute_data = &mut ctx.dispute_case.try_borrow_mut_data()?;
     let dispute = DisputeCase::load_mut(dispute_data)?;
+
+    // SECURITY FIX C-02: Verify dispute_case PDA derivation
+    let (expected_dispute_pda, expected_dispute_bump) = find_program_address(
+        &[b"dispute", &dispute.escrow],
+        program_id,
+    );
+    require!(ctx.dispute_case.key() == &expected_dispute_pda, EscrowError::InvalidPda);
+    require!(dispute.bump == expected_dispute_bump, EscrowError::InvalidPda);
 
     require!(!dispute.is_resolved(), EscrowError::DisputeAlreadyResolved);
     require!(clock.unix_timestamp < dispute.voting_deadline, EscrowError::VotingDeadlinePassed);
@@ -469,7 +591,8 @@ pub fn process_cast_arbitration_vote(
 
     // Cast vote
     dispute.set_vote(position, args.vote);
-    arb.cases_voted += 1;
+    // SECURITY FIX H-05: Use checked arithmetic
+    arb.cases_voted = arb.cases_voted.saturating_add(1);
 
     Ok(())
 }
@@ -501,14 +624,32 @@ impl<'a> TryFrom<&'a [AccountInfo]> for FinalizeDisputeCaseAccounts<'a> {
 pub fn process_finalize_dispute_case(
     accounts: &[AccountInfo],
     _data: &[u8],
-    _program_id: &Pubkey,
+    program_id: &Pubkey,
 ) -> ProgramResult {
     let ctx = FinalizeDisputeCaseAccounts::try_from(accounts)?;
     let clock = Clock::get()?;
 
+    // SECURITY FIX C-01: Verify dispute_case account is owned by this program
+    if *ctx.dispute_case.owner() != ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
+    // SECURITY FIX C-01: Verify escrow account is owned by this program
+    if *ctx.escrow.owner() != ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
     // Load dispute case
     let dispute_data = &mut ctx.dispute_case.try_borrow_mut_data()?;
     let dispute = DisputeCase::load_mut(dispute_data)?;
+
+    // SECURITY FIX C-02: Verify dispute_case PDA derivation
+    let (expected_dispute_pda, expected_dispute_bump) = find_program_address(
+        &[b"dispute", ctx.escrow.key()],
+        program_id,
+    );
+    require!(ctx.dispute_case.key() == &expected_dispute_pda, EscrowError::InvalidPda);
+    require!(dispute.bump == expected_dispute_bump, EscrowError::InvalidPda);
 
     require!(!dispute.is_resolved(), EscrowError::DisputeAlreadyResolved);
 
@@ -533,6 +674,14 @@ pub fn process_finalize_dispute_case(
     // Load and update escrow
     let escrow_data = &mut ctx.escrow.try_borrow_mut_data()?;
     let escrow = JobEscrow::load_mut(escrow_data)?;
+
+    // SECURITY FIX C-02: Verify escrow PDA derivation
+    let (expected_escrow_pda, expected_escrow_bump) = find_program_address(
+        &[b"escrow", &escrow.job_id_hash, &escrow.poster],
+        program_id,
+    );
+    require!(ctx.escrow.key() == &expected_escrow_pda, EscrowError::InvalidPda);
+    require!(escrow.bump == expected_escrow_bump, EscrowError::InvalidPda);
 
     require!(&escrow.dispute_case == ctx.dispute_case.key(), EscrowError::EscrowMismatch);
 
@@ -580,13 +729,39 @@ impl<'a> TryFrom<&'a [AccountInfo]> for ExecuteDisputeResolutionAccounts<'a> {
 pub fn process_execute_dispute_resolution(
     accounts: &[AccountInfo],
     _data: &[u8],
-    _program_id: &Pubkey,
+    program_id: &Pubkey,
 ) -> ProgramResult {
     let ctx = ExecuteDisputeResolutionAccounts::try_from(accounts)?;
+
+    // SECURITY FIX C-01: Verify dispute_case account is owned by this program
+    if *ctx.dispute_case.owner() != ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
+    // SECURITY FIX C-01: Verify escrow account is owned by this program
+    if *ctx.escrow.owner() != ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
+    // SECURITY FIX C-01: Verify reputation accounts are owned by this program
+    if *ctx.worker_reputation.owner() != ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+    if *ctx.poster_reputation.owner() != ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
 
     // Load dispute case
     let dispute_data = ctx.dispute_case.try_borrow_data()?;
     let dispute = DisputeCase::load(&dispute_data)?;
+
+    // SECURITY FIX C-02: Verify dispute_case PDA derivation
+    let (expected_dispute_pda, expected_dispute_bump) = find_program_address(
+        &[b"dispute", ctx.escrow.key()],
+        program_id,
+    );
+    require!(ctx.dispute_case.key() == &expected_dispute_pda, EscrowError::InvalidPda);
+    require!(dispute.bump == expected_dispute_bump, EscrowError::InvalidPda);
 
     let resolution = require_some!(
         DisputeResolution::from_u8(dispute.resolution),
@@ -601,6 +776,14 @@ pub fn process_execute_dispute_resolution(
     let escrow_data = &mut ctx.escrow.try_borrow_mut_data()?;
     let escrow = JobEscrow::load_mut(escrow_data)?;
 
+    // SECURITY FIX C-02: Verify escrow PDA derivation
+    let (expected_escrow_pda, expected_escrow_bump) = find_program_address(
+        &[b"escrow", &escrow.job_id_hash, &escrow.poster],
+        program_id,
+    );
+    require!(ctx.escrow.key() == &expected_escrow_pda, EscrowError::InvalidPda);
+    require!(escrow.bump == expected_escrow_bump, EscrowError::InvalidPda);
+
     require!(
         escrow.status == EscrowStatus::DisputeWorkerWins as u8 ||
         escrow.status == EscrowStatus::DisputePosterWins as u8 ||
@@ -610,6 +793,20 @@ pub fn process_execute_dispute_resolution(
 
     require!(ctx.worker.key() == &escrow.worker, EscrowError::WorkerMismatch);
     require!(ctx.poster.key() == &escrow.poster, EscrowError::PosterMismatch);
+
+    // SECURITY FIX C-03: Verify worker reputation PDA derivation
+    let (expected_worker_rep, _) = find_program_address(
+        &[b"reputation", &escrow.worker],
+        program_id,
+    );
+    require!(ctx.worker_reputation.key() == &expected_worker_rep, EscrowError::InvalidPda);
+
+    // SECURITY FIX C-03: Verify poster reputation PDA derivation
+    let (expected_poster_rep, _) = find_program_address(
+        &[b"reputation", &escrow.poster],
+        program_id,
+    );
+    require!(ctx.poster_reputation.key() == &expected_poster_rep, EscrowError::InvalidPda);
 
     let amount = escrow.amount;
 
@@ -622,30 +819,34 @@ pub fn process_execute_dispute_resolution(
 
     match resolution {
         DisputeResolution::WorkerWins => {
-            let platform_fee = amount / 100;
-            let worker_payment = amount - platform_fee;
+            // SECURITY FIX H-05: Use checked arithmetic
+            let platform_fee = amount.checked_div(100).unwrap_or(0);
+            let worker_payment = amount.checked_sub(platform_fee).ok_or(EscrowError::ArithmeticOverflow)?;
 
             transfer_lamports(ctx.escrow, ctx.worker, worker_payment)?;
             transfer_lamports(ctx.escrow, ctx.platform, platform_fee)?;
 
-            worker_rep.disputes_won += 1;
-            poster_rep.disputes_lost += 1;
+            // SECURITY FIX H-05: Use saturating arithmetic
+            worker_rep.disputes_won = worker_rep.disputes_won.saturating_add(1);
+            poster_rep.disputes_lost = poster_rep.disputes_lost.saturating_add(1);
 
             escrow.status = EscrowStatus::Released as u8;
         }
         DisputeResolution::PosterWins => {
             transfer_lamports(ctx.escrow, ctx.poster, amount)?;
 
-            poster_rep.disputes_won += 1;
-            worker_rep.disputes_lost += 1;
+            // SECURITY FIX H-05: Use saturating arithmetic
+            poster_rep.disputes_won = poster_rep.disputes_won.saturating_add(1);
+            worker_rep.disputes_lost = worker_rep.disputes_lost.saturating_add(1);
 
             escrow.status = EscrowStatus::Refunded as u8;
         }
         DisputeResolution::Split => {
-            let platform_fee = amount / 100;
-            let remaining = amount - platform_fee;
-            let worker_half = remaining / 2;
-            let poster_half = remaining - worker_half;
+            // SECURITY FIX H-05: Use checked arithmetic
+            let platform_fee = amount.checked_div(100).unwrap_or(0);
+            let remaining = amount.checked_sub(platform_fee).ok_or(EscrowError::ArithmeticOverflow)?;
+            let worker_half = remaining.checked_div(2).unwrap_or(0);
+            let poster_half = remaining.checked_sub(worker_half).ok_or(EscrowError::ArithmeticOverflow)?;
 
             transfer_lamports(ctx.escrow, ctx.worker, worker_half)?;
             transfer_lamports(ctx.escrow, ctx.poster, poster_half)?;
@@ -696,9 +897,27 @@ pub fn process_update_arbitrator_accuracy(
     let ctx = UpdateArbitratorAccuracyAccounts::try_from(accounts)?;
     let clock = Clock::get()?;
 
+    // SECURITY FIX C-01: Verify dispute_case account is owned by this program
+    if *ctx.dispute_case.owner() != ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
+    // SECURITY FIX C-01: Verify arbitrator_account is owned by this program
+    if *ctx.arbitrator_account.owner() != ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
     // Load dispute case
     let dispute_data = ctx.dispute_case.try_borrow_data()?;
     let dispute = DisputeCase::load(&dispute_data)?;
+
+    // SECURITY FIX C-02: Verify dispute_case PDA derivation
+    let (expected_dispute_pda, expected_dispute_bump) = find_program_address(
+        &[b"dispute", &dispute.escrow],
+        program_id,
+    );
+    require!(ctx.dispute_case.key() == &expected_dispute_pda, EscrowError::InvalidPda);
+    require!(dispute.bump == expected_dispute_bump, EscrowError::InvalidPda);
 
     let resolution = require_some!(
         DisputeResolution::from_u8(dispute.resolution),
@@ -709,6 +928,14 @@ pub fn process_update_arbitrator_accuracy(
     // Load arbitrator
     let arb_data = &mut ctx.arbitrator_account.try_borrow_mut_data()?;
     let arb = ArbitratorEntry::load_mut(arb_data)?;
+
+    // SECURITY FIX C-02: Verify arbitrator PDA derivation
+    let (expected_arb_pda, expected_arb_bump) = find_program_address(
+        &[b"arbitrator", &arb.agent],
+        program_id,
+    );
+    require!(ctx.arbitrator_account.key() == &expected_arb_pda, EscrowError::InvalidPda);
+    require!(arb.bump == expected_arb_bump, EscrowError::InvalidPda);
 
     // Find this arbitrator's position and vote
     let position = require_some!(
@@ -768,7 +995,8 @@ pub fn process_update_arbitrator_accuracy(
     };
 
     if voted_correctly {
-        arb.cases_correct += 1;
+        // SECURITY FIX H-05: Use saturating arithmetic
+        arb.cases_correct = arb.cases_correct.saturating_add(1);
     }
 
     Ok(())
@@ -804,14 +1032,36 @@ impl<'a> TryFrom<&'a [AccountInfo]> for RemoveArbitratorAccounts<'a> {
 pub fn process_remove_arbitrator(
     accounts: &[AccountInfo],
     _data: &[u8],
-    _program_id: &Pubkey,
+    program_id: &Pubkey,
 ) -> ProgramResult {
     let ctx = RemoveArbitratorAccounts::try_from(accounts)?;
+
+    // SECURITY FIX C-01: Verify pool account is owned by this program
+    if *ctx.pool.owner() != ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
+    // SECURITY FIX C-01: Verify arbitrator_account is owned by this program
+    if *ctx.arbitrator_account.owner() != ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
+    // SECURITY FIX H-03: Verify pool PDA derivation
+    let (expected_pool_pda, _) = find_program_address(&[b"arbitrator_pool_v2"], program_id);
+    require!(ctx.pool.key() == &expected_pool_pda, EscrowError::InvalidPda);
+
+    // SECURITY FIX C-02: Verify arbitrator PDA derivation
+    let (expected_arb_pda, expected_arb_bump) = find_program_address(
+        &[b"arbitrator", ctx.arbitrator_agent.key()],
+        program_id,
+    );
+    require!(ctx.arbitrator_account.key() == &expected_arb_pda, EscrowError::InvalidPda);
 
     // Load arbitrator
     let arb_data = &mut ctx.arbitrator_account.try_borrow_mut_data()?;
     let arb = ArbitratorEntry::load_mut(arb_data)?;
 
+    require!(arb.bump == expected_arb_bump, EscrowError::InvalidPda);
     require!(arb.is_active(), EscrowError::ArbitratorNotActive);
     require!(&arb.agent == ctx.arbitrator_agent.key(), EscrowError::Unauthorized);
 
@@ -822,8 +1072,16 @@ pub fn process_remove_arbitrator(
 
     arb.is_active = 0;
 
-    // Return stake
-    transfer_lamports(ctx.arbitrator_account, ctx.arbitrator_agent, arb.stake)?;
+    // SECURITY FIX H-04: Verify account has enough balance and use safe transfer
+    let account_balance = *ctx.arbitrator_account.try_borrow_lamports()?;
+    let rent = Rent::get()?.minimum_balance(ArbitratorEntry::SPACE);
+    let available = account_balance.saturating_sub(rent);
+    
+    // Only return what's available, up to stake
+    let return_amount = core::cmp::min(arb.stake, available);
+    if return_amount > 0 {
+        transfer_lamports(ctx.arbitrator_account, ctx.arbitrator_agent, return_amount)?;
+    }
 
     Ok(())
 }

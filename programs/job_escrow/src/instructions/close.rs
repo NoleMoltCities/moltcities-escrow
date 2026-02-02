@@ -5,7 +5,7 @@
 use pinocchio::{
     account_info::AccountInfo,
     program_error::ProgramError,
-    pubkey::Pubkey,
+    pubkey::{find_program_address, Pubkey},
     ProgramResult,
 };
 
@@ -13,6 +13,7 @@ use crate::{
     errors::EscrowError,
     state::{JobEscrow, EscrowStatus, DisputeCase, ArbitratorPool, ArbitratorEntry},
     require,
+    ID,
 };
 
 /// Transfer all lamports and close account
@@ -56,13 +57,26 @@ impl<'a> TryFrom<&'a [AccountInfo]> for CloseEscrowAccounts<'a> {
 pub fn process_close_escrow(
     accounts: &[AccountInfo],
     _data: &[u8],
-    _program_id: &Pubkey,
+    program_id: &Pubkey,
 ) -> ProgramResult {
     let ctx = CloseEscrowAccounts::try_from(accounts)?;
+
+    // SECURITY FIX C-01: Verify escrow account is owned by this program
+    if *ctx.escrow.owner() != ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
 
     // Load escrow
     let escrow_data = ctx.escrow.try_borrow_data()?;
     let escrow = JobEscrow::load(&escrow_data)?;
+
+    // SECURITY FIX C-02: Verify escrow PDA derivation
+    let (expected_pda, expected_bump) = find_program_address(
+        &[b"escrow", &escrow.job_id_hash, &escrow.poster],
+        program_id,
+    );
+    require!(ctx.escrow.key() == &expected_pda, EscrowError::InvalidPda);
+    require!(escrow.bump == expected_bump, EscrowError::InvalidPda);
 
     // Can only close if in terminal state
     require!(
@@ -113,13 +127,31 @@ impl<'a> TryFrom<&'a [AccountInfo]> for CloseDisputeCaseAccounts<'a> {
 pub fn process_close_dispute_case(
     accounts: &[AccountInfo],
     _data: &[u8],
-    _program_id: &Pubkey,
+    program_id: &Pubkey,
 ) -> ProgramResult {
     let ctx = CloseDisputeCaseAccounts::try_from(accounts)?;
+
+    // SECURITY FIX C-01: Verify dispute_case account is owned by this program
+    if *ctx.dispute_case.owner() != ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
+    // SECURITY FIX C-01: Verify escrow account is owned by this program
+    if *ctx.escrow.owner() != ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
 
     // Load dispute case
     let dispute_data = ctx.dispute_case.try_borrow_data()?;
     let dispute = DisputeCase::load(&dispute_data)?;
+
+    // SECURITY FIX C-02: Verify dispute_case PDA derivation
+    let (expected_dispute_pda, expected_dispute_bump) = find_program_address(
+        &[b"dispute", ctx.escrow.key()],
+        program_id,
+    );
+    require!(ctx.dispute_case.key() == &expected_dispute_pda, EscrowError::InvalidPda);
+    require!(dispute.bump == expected_dispute_bump, EscrowError::InvalidPda);
 
     // Must be resolved
     require!(dispute.is_resolved(), EscrowError::DisputeNotResolved);
@@ -130,6 +162,14 @@ pub fn process_close_dispute_case(
     // Verify escrow is in terminal state
     let escrow_data = ctx.escrow.try_borrow_data()?;
     let escrow = JobEscrow::load(&escrow_data)?;
+
+    // SECURITY FIX C-02: Verify escrow PDA derivation
+    let (expected_escrow_pda, expected_escrow_bump) = find_program_address(
+        &[b"escrow", &escrow.job_id_hash, &escrow.poster],
+        program_id,
+    );
+    require!(ctx.escrow.key() == &expected_escrow_pda, EscrowError::InvalidPda);
+    require!(escrow.bump == expected_escrow_bump, EscrowError::InvalidPda);
 
     require!(
         escrow.status == EscrowStatus::Released as u8 ||
@@ -175,13 +215,36 @@ impl<'a> TryFrom<&'a [AccountInfo]> for CloseArbitratorAccountAccounts<'a> {
 pub fn process_close_arbitrator_account(
     accounts: &[AccountInfo],
     _data: &[u8],
-    _program_id: &Pubkey,
+    program_id: &Pubkey,
 ) -> ProgramResult {
     let ctx = CloseArbitratorAccountAccounts::try_from(accounts)?;
+
+    // SECURITY FIX C-01: Verify pool account is owned by this program
+    if *ctx.pool.owner() != ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
+    // SECURITY FIX C-01: Verify arbitrator_account is owned by this program
+    if *ctx.arbitrator_account.owner() != ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
+    // SECURITY FIX H-03: Verify pool PDA derivation
+    let (expected_pool_pda, _) = find_program_address(&[b"arbitrator_pool_v2"], program_id);
+    require!(ctx.pool.key() == &expected_pool_pda, EscrowError::InvalidPda);
+
+    // SECURITY FIX C-02: Verify arbitrator_account PDA derivation
+    let (expected_arb_pda, expected_arb_bump) = find_program_address(
+        &[b"arbitrator", ctx.agent.key()],
+        program_id,
+    );
+    require!(ctx.arbitrator_account.key() == &expected_arb_pda, EscrowError::InvalidPda);
 
     // Load arbitrator
     let arb_data = ctx.arbitrator_account.try_borrow_data()?;
     let arb = ArbitratorEntry::load(&arb_data)?;
+
+    require!(arb.bump == expected_arb_bump, EscrowError::InvalidPda);
 
     // Must not be active
     require!(!arb.is_active(), EscrowError::ArbitratorStillActive);
