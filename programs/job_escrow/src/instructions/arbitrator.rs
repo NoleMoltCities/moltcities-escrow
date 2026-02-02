@@ -72,7 +72,7 @@ pub fn process_init_arbitrator_pool(
     let ctx = InitArbitratorPoolAccounts::try_from(accounts)?;
 
     // Derive PDA
-    let (expected_pda, bump) = find_program_address(&[b"arbitrator_pool"], program_id);
+    let (expected_pda, bump) = find_program_address(&[b"arbitrator_pool_v2"], program_id);
     require!(ctx.pool.key() == &expected_pda, EscrowError::InvalidPda);
 
     // Create account
@@ -80,7 +80,7 @@ pub fn process_init_arbitrator_pool(
     let rent_lamports = rent.minimum_balance(ArbitratorPool::SPACE);
 
     let bump_ref = &[bump];
-    let signer_seeds = seeds!(b"arbitrator_pool", bump_ref);
+    let signer_seeds = seeds!(b"arbitrator_pool_v2", bump_ref);
     let signer = Signer::from(&signer_seeds);
 
     CreateAccount {

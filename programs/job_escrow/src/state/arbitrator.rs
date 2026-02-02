@@ -17,7 +17,7 @@ pub const ARBITRATOR_VOTE_FEE: u64 = 1_000_000;
 
 /// Global arbitrator pool
 ///
-/// Seeds: ["arbitrator_pool"]
+/// Seeds: ["arbitrator_pool_v2"]
 #[repr(C)]
 pub struct ArbitratorPool {
     /// Platform authority who can manage the pool
