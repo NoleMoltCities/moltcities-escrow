@@ -19,8 +19,8 @@ use crate::{
     require,
 };
 
-/// Minimum escrow amount (0.01 SOL)
-pub const MIN_ESCROW_AMOUNT: u64 = 10_000_000;
+/// Minimum escrow amount (0.001 SOL)
+pub const MIN_ESCROW_AMOUNT: u64 = 1_000_000;
 
 /// Default escrow expiry: 30 days in seconds
 pub const DEFAULT_EXPIRY_SECONDS: i64 = 30 * 24 * 60 * 60;
