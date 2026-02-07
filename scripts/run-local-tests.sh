@@ -16,7 +16,8 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 # Configuration
 PROGRAM_SO="$PROJECT_DIR/target/deploy/job_escrow.so"
-PROGRAM_ID="27YquD9ZJvjLfELseqgawEMZq1mD1betBQZz5RgehNZr"
+# Mainnet program ID (matches the hardcoded ID in the binary)
+PROGRAM_ID="FCRmfZbfmaPevAk2V1UGQAGKWXw9oeJ118A2JYJ9VadE"
 VALIDATOR_PORT=8899
 VALIDATOR_LOG="$PROJECT_DIR/validator.log"
 LEDGER_DIR="$PROJECT_DIR/test-ledger"

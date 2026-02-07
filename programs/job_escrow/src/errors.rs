@@ -96,6 +96,10 @@ pub enum EscrowError {
     InvalidPda = 6042,
     /// Arithmetic overflow
     ArithmeticOverflow = 6043,
+    /// Not a token escrow (trying to use token operations on SOL escrow)
+    NotTokenEscrow = 6044,
+    /// Token account does not match escrow
+    TokenAccountMismatch = 6045,
 }
 
 impl From<EscrowError> for ProgramError {

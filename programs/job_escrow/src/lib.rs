@@ -100,6 +100,10 @@ pub fn process_instruction(
         23 => process_close_dispute_case(accounts, data, program_id),
         24 => process_close_arbitrator_account(accounts, data, program_id),
         
+        // SPL Token escrow operations
+        25 => process_create_token_escrow(accounts, data, program_id),
+        26 => process_release_tokens_to_worker(accounts, data, program_id),
+        
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }

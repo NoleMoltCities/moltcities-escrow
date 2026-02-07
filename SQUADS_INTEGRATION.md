@@ -16,7 +16,7 @@ Integrate Squads Protocol v4 for multi-sig control of MoltCities platform operat
 
 ### Configuration
 - **Threshold:** 2 of 3 signers
-- **Signers:** All controlled by Jim initially (can distribute later)
+- **Signers:** All controlled by Operator initially (can distribute later)
 - **Key Storage:** `~/.moltcities/multisig/` (NEVER committed to git)
 
 ### Protected Operations
@@ -109,7 +109,7 @@ This is less standard but faster to implement.
 
 ## Security Notes
 
-- All 3 signers currently controlled by Jim
+- All 3 signers currently controlled by Operator
 - Keys stored at `~/.moltcities/multisig/` (outside any repo)
 - Can distribute signers later (e.g., to trusted team members)
 - 2/3 threshold means any 2 signers can approve operations

@@ -17,7 +17,7 @@ function findEscrowPDA(jobIdHash: Buffer, poster: PublicKey): [PublicKey, number
 }
 
 async function main() {
-  const connection = new Connection("https://devnet.helius-rpc.com/?api-key=b7875804-ae02-4a11-845e-902e06a896c0", "confirmed");
+  const connection = new Connection("process.env.HELIUS_DEVNET_RPC || "https://api.devnet.solana.com"", "confirmed");
   
   const poster = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fs.readFileSync("test-poster.json", "utf-8"))));
   const worker = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fs.readFileSync("test-worker.json", "utf-8"))));

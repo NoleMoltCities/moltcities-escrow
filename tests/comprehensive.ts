@@ -27,7 +27,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Program ID
-const PROGRAM_ID = new PublicKey("27YquD9ZJvjLfELseqgawEMZq1mD1betBQZz5RgehNZr");
+const PROGRAM_ID = new PublicKey("FCRmfZbfmaPevAk2V1UGQAGKWXw9oeJ118A2JYJ9VadE");
 const PLATFORM_WALLET = new PublicKey("BpH7T5tijFRSyPhMn62WcgGFjHEUMJ8WXQfJ2GAfB893");
 
 // Instruction discriminators (single byte, from lib.rs)

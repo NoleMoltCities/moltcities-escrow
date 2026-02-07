@@ -26,7 +26,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Program ID
-const PROGRAM_ID = new PublicKey("27YquD9ZJvjLfELseqgawEMZq1mD1betBQZz5RgehNZr");
+const PROGRAM_ID = new PublicKey("FCRmfZbfmaPevAk2V1UGQAGKWXw9oeJ118A2JYJ9VadE");
 const PLATFORM_WALLET = new PublicKey("BpH7T5tijFRSyPhMn62WcgGFjHEUMJ8WXQfJ2GAfB893");
 
 // Instruction discriminators (single byte, from lib.rs)
@@ -450,7 +450,7 @@ function deserializeReputation(data: Buffer): ReputationState {
 describe("job_escrow (Pinocchio)", () => {
   // Use devnet or local validator
   // Priority: RPC_URL env > Helius devnet > public devnet > localnet
-  const HELIUS_RPC = "https://devnet.helius-rpc.com/?api-key=b7875804-ae02-4a11-845e-902e06a896c0";
+  const HELIUS_RPC = "process.env.HELIUS_DEVNET_RPC || "https://api.devnet.solana.com"";
   const RPC_URL = process.env.RPC_URL || 
     (process.env.USE_DEVNET === "true" ? HELIUS_RPC : "http://localhost:8899");
   

@@ -9,7 +9,7 @@ async function main() {
   console.log('Testing EscrowClient library...\n');
   
   const client = new EscrowClient(
-    'https://devnet.helius-rpc.com/?api-key=b7875804-ae02-4a11-845e-902e06a896c0'
+    'process.env.HELIUS_DEVNET_RPC || "https://api.devnet.solana.com"'
   );
   
   // Load test wallets

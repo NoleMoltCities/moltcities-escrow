@@ -2,7 +2,7 @@ import { Connection, Keypair, PublicKey, Transaction, SystemProgram, LAMPORTS_PE
 import * as fs from "fs";
 
 async function main() {
-  const connection = new Connection("https://devnet.helius-rpc.com/?api-key=b7875804-ae02-4a11-845e-902e06a896c0", "confirmed");
+  const connection = new Connection("process.env.HELIUS_DEVNET_RPC || "https://api.devnet.solana.com"", "confirmed");
   
   // Load platform wallet
   const platformWalletPath = process.env.HOME + "/.moltcities/platform_wallet.json";

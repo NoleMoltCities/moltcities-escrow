@@ -4,7 +4,7 @@
  * TypeScript client for the Pinocchio-based escrow program.
  * Provides typed helpers for all 25 instructions.
  * 
- * Program ID: 27YquD9ZJvjLfELseqgawEMZq1mD1betBQZz5RgehNZr
+ * Program ID: FCRmfZbfmaPevAk2V1UGQAGKWXw9oeJ118A2JYJ9VadE (mainnet)
  */
 
 import {
@@ -24,8 +24,11 @@ import { createHash } from 'crypto';
 // Constants
 // ============================================================================
 
-export const PROGRAM_ID = new PublicKey('27YquD9ZJvjLfELseqgawEMZq1mD1betBQZz5RgehNZr');
+export const PROGRAM_ID = new PublicKey('FCRmfZbfmaPevAk2V1UGQAGKWXw9oeJ118A2JYJ9VadE');
 export const PLATFORM_WALLET = new PublicKey('BpH7T5tijFRSyPhMn62WcgGFjHEUMJ8WXQfJ2GAfB893');
+
+// SPL Token program ID
+export const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
 
 // Instruction discriminators (single byte)
 export enum Instruction {
@@ -54,6 +57,9 @@ export enum Instruction {
   RemoveArbitrator = 22,
   CloseDisputeCase = 23,
   CloseArbitratorAccount = 24,
+  // SPL Token escrow operations
+  CreateTokenEscrow = 25,
+  ReleaseTokensToWorker = 26,
 }
 
 // Account sizes
@@ -727,6 +733,93 @@ export function closeArbitratorAccountInstruction(
       { pubkey: pool, isSigner: false, isWritable: true },
       { pubkey: arbitratorEntry, isSigner: false, isWritable: true },
       { pubkey: agent, isSigner: true, isWritable: true },
+    ],
+    programId: PROGRAM_ID,
+    data,
+  });
+}
+
+// ============================================================================
+// SPL Token Escrow Instructions
+// ============================================================================
+
+/**
+ * Create a new escrow for SPL tokens
+ * Accounts:
+ * 0. escrow (PDA, writable)
+ * 1. poster (signer, writable)
+ * 2. token_mint (readonly)
+ * 3. poster_token_account (writable) - poster's ATA for the token
+ * 4. escrow_token_account (writable) - escrow's ATA for the token
+ * 5. system_program
+ * 6. token_program
+ * 
+ * Data: job_id_hash (32) + amount (8) + expiry_seconds (8)
+ */
+export function createTokenEscrowInstruction(
+  escrow: PublicKey,
+  poster: PublicKey,
+  tokenMint: PublicKey,
+  posterTokenAccount: PublicKey,
+  escrowTokenAccount: PublicKey,
+  jobIdHash: Buffer,
+  amount: bigint,
+  expirySeconds: bigint = BigInt(0),
+): TransactionInstruction {
+  const data = Buffer.alloc(1 + 32 + 8 + 8);
+  data.writeUInt8(Instruction.CreateTokenEscrow, 0);
+  jobIdHash.copy(data, 1);
+  data.writeBigUInt64LE(amount, 33);
+  data.writeBigInt64LE(expirySeconds, 41);
+
+  return new TransactionInstruction({
+    keys: [
+      { pubkey: escrow, isSigner: false, isWritable: true },
+      { pubkey: poster, isSigner: true, isWritable: true },
+      { pubkey: tokenMint, isSigner: false, isWritable: false },
+      { pubkey: posterTokenAccount, isSigner: false, isWritable: true },
+      { pubkey: escrowTokenAccount, isSigner: false, isWritable: true },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+    ],
+    programId: PROGRAM_ID,
+    data,
+  });
+}
+
+/**
+ * Platform releases SPL tokens to worker
+ * Accounts:
+ * 0. escrow (PDA, writable)
+ * 1. platform_authority (signer)
+ * 2. worker (writable) - for SOL fee if any
+ * 3. escrow_token_account (writable)
+ * 4. worker_token_account (writable)
+ * 5. platform_token_account (writable)
+ * 6. token_program
+ * 
+ * Data: none (just discriminator)
+ */
+export function releaseTokensToWorkerInstruction(
+  escrow: PublicKey,
+  platformAuthority: PublicKey,
+  worker: PublicKey,
+  escrowTokenAccount: PublicKey,
+  workerTokenAccount: PublicKey,
+  platformTokenAccount: PublicKey,
+): TransactionInstruction {
+  const data = Buffer.alloc(1);
+  data.writeUInt8(Instruction.ReleaseTokensToWorker, 0);
+
+  return new TransactionInstruction({
+    keys: [
+      { pubkey: escrow, isSigner: false, isWritable: true },
+      { pubkey: platformAuthority, isSigner: true, isWritable: false },
+      { pubkey: worker, isSigner: false, isWritable: true },
+      { pubkey: escrowTokenAccount, isSigner: false, isWritable: true },
+      { pubkey: workerTokenAccount, isSigner: false, isWritable: true },
+      { pubkey: platformTokenAccount, isSigner: false, isWritable: true },
+      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
     ],
     programId: PROGRAM_ID,
     data,

@@ -53,7 +53,7 @@ pub struct JobEscrow {
     pub poster: Pubkey,
     /// The assigned worker (default = Pubkey::default() when unassigned)
     pub worker: Pubkey,
-    /// Amount of lamports in escrow
+    /// Amount in escrow (lamports for SOL, token units for SPL)
     pub amount: u64,
     /// Current status of the escrow
     pub status: u8,
@@ -75,8 +75,14 @@ pub struct JobEscrow {
     pub has_dispute_case: u8,
     /// PDA bump seed
     pub bump: u8,
+    /// SPL Token support: 0 = SOL escrow, 1 = SPL token escrow
+    pub is_token_escrow: u8,
+    /// SPL Token mint address (zeroed for SOL escrows)
+    pub token_mint: Pubkey,
+    /// Escrow token account PDA (zeroed for SOL escrows)
+    pub escrow_token_account: Pubkey,
     /// Padding for alignment
-    pub _padding: [u8; 5],
+    pub _padding: [u8; 2],
 }
 
 impl JobEscrow {
@@ -157,6 +163,22 @@ impl JobEscrow {
     #[inline(always)]
     pub fn is_pending_review(&self) -> bool {
         self.status == EscrowStatus::PendingReview as u8
+    }
+
+    /// Check if this is an SPL token escrow (vs SOL)
+    #[inline(always)]
+    pub fn is_token_escrow(&self) -> bool {
+        self.is_token_escrow == 1
+    }
+
+    /// Get token mint if this is a token escrow
+    #[inline(always)]
+    pub fn get_token_mint(&self) -> Option<&Pubkey> {
+        if self.is_token_escrow() {
+            Some(&self.token_mint)
+        } else {
+            None
+        }
     }
 
     /// Get dispute_initiated_at as Option

@@ -4,6 +4,7 @@
 //! and a process() method for execution.
 
 mod create_escrow;
+mod create_token_escrow;
 mod assign_worker;
 mod submit_work;
 mod release;
@@ -13,6 +14,7 @@ mod reputation;
 mod close;
 
 pub use create_escrow::*;
+pub use create_token_escrow::*;
 pub use assign_worker::*;
 pub use submit_work::*;
 pub use release::*;
@@ -74,4 +76,8 @@ pub enum Instruction {
     CloseDisputeCase = 23,
     /// Close arbitrator account
     CloseArbitratorAccount = 24,
+    /// Create a token escrow (SPL tokens)
+    CreateTokenEscrow = 25,
+    /// Release tokens to worker
+    ReleaseTokensToWorker = 26,
 }
